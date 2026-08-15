@@ -1,0 +1,242 @@
+
+#include <math.h>
+
+#include "vb_dsp.h"
+#include "v810_mem.h"
+#include "vb_set.h"
+
+bool tileVisible[2048];
+int blankTile;
+
+#define BRIGHTNESS_FACTOR 1.75
+#define GAMMA 0.9
+
+static u8 brightness_lut[256];
+
+static inline u8 clamp255(int x) {
+	return x < 255 ? x : 255;
+}
+
+void setup_brightness_lut(void) {
+	for (int i = 0; i < 256; i++) {
+		brightness_lut[i] = clamp255(pow(((float)i) * BRIGHTNESS_FACTOR / 255, GAMMA) * 255);
+	}
+}
+
+int video_get_colour(int id, int brt_reg) {
+	if (id == 0) {
+		return tVBOpt.MULTICOL && !tVBOpt.ANAGLYPH ? tVBOpt.MTINT[tVBOpt.MULTIID][0] : 0;
+	}
+	int brightness = clamp255(brightness_lut[clamp255(brt_reg)] * (tVBOpt.MULTICOL && !tVBOpt.ANAGLYPH ? tVBOpt.STINT[tVBOpt.MULTIID][id - 1] : 1));
+	int fulltint = tVBOpt.ANAGLYPH ? 0xffffff : tVBOpt.MULTICOL ? tVBOpt.MTINT[tVBOpt.MULTIID][id] : tVBOpt.TINT;
+	int col_tint =
+		((brightness * ((fulltint) & 0xff) / 255)) |
+		((brightness * ((fulltint >> 8) & 0xff) / 255) << 8) |
+		((brightness * ((fulltint >> 16) & 0xff) / 255) << 16);
+	if (tVBOpt.ANAGLYPH || !tVBOpt.MULTICOL) return col_tint;
+
+	int black_brightness = 255 - brightness;
+	int black_tint = tVBOpt.ANAGLYPH ? 0 :
+		((black_brightness * ((tVBOpt.MTINT[tVBOpt.MULTIID][0]) & 0xff) / 255)) |
+		((black_brightness * ((tVBOpt.MTINT[tVBOpt.MULTIID][0] >> 8) & 0xff) / 255) << 8) |
+		((black_brightness * ((tVBOpt.MTINT[tVBOpt.MULTIID][0] >> 16) & 0xff) / 255) << 16);
+
+	#if DRC_AVAILABLE
+	return __builtin_arm_uqadd8(col_tint, black_tint);
+	#else
+	return ((col_tint + black_tint) & 0xff)
+		| (((col_tint & ~0xff) + (black_tint & ~0xff)) & 0xff00)
+		| (((col_tint & ~0xffff) + (black_tint & ~0xffff)) & 0xff0000)
+		| (((col_tint & ~0xffffff) + (black_tint & ~0xffffff)) & 0xff000000);
+	#endif
+}
+
+int videoProcessingTime(void) {
+	int time = 54688;
+	WORLD *worlds = (WORLD*)(vb_state->V810_DISPLAY_RAM.off + 0x3d800);
+	int object_group_id = 3;
+	for (int wrld = 31; wrld >= 0; wrld--) {
+		if (worlds[wrld].end) {
+			time += 308;
+			break;
+		}
+		if (worlds[wrld].on == 0) {
+			// dummy world
+			time += 561;
+			continue;
+		}
+		if (worlds[wrld].bgm != 3) {
+			// background world
+			int w = (worlds[wrld].w & 0x1fff) + 1;
+			int h = worlds[wrld].h + 1;
+			int gy = worlds[wrld].gy;
+			int mx = worlds[wrld].mx & 0xfff;
+			s16 mp = (worlds[wrld].mp << 1) >> 1;
+			int my = (worlds[wrld].my << 3) >> 3;
+
+			if (gy > 0) time += (gy < 28 ? gy : 28) * 5;
+
+			switch (worlds[wrld].bgm) {
+				case 0: {
+					// normal world
+					time += 880;
+					int wstart = mx - abs(mp);
+					int wend = mx + abs(mp) + w + 1;
+					int wtiles = (((wend + 7) & ~7) - (wstart & ~7)) >> 3;
+					int offset = (gy - my) & 7;
+					for (int y = 0; y < 224; y += 8) {
+						if (gy + h + 1 <= y) break;
+						if (y == 216) time -= 9;
+						if (gy >= y + 8) {
+							time += 4 + (y != 216);
+							continue;
+						}
+
+						bool start = gy >= y;
+						bool end = gy + h + 1 <= y + 8;
+						time += start ? 12 : (end ? 13 : 16);
+						if (y == 0 && !start) time += 6 - 2 * !end;
+
+						int rows;
+						if (gy + h + 1 < y + 8 && !start) {
+							rows = (gy + h + 1) & 7;
+						} else {
+							rows = y + 8 - gy;
+							if (rows > 8) rows = 8;
+						}
+						time += 2 * rows * wtiles;
+						int tileloads = 1 + (
+							offset != 0 &&
+							(!start || gy < y + offset) &&
+							(!end || start || gy + h + 1 > y + offset)
+						);
+						time += tileloads * (91 + 2 * wtiles);
+					}
+					break;
+				}
+				case 1: {
+					// h-bias world
+					s16 *params = (s16 *)(vb_state->V810_DISPLAY_RAM.off + 0x20000 + worlds[wrld].param * 2);
+					time += 880;
+					for (int y = 0; y < 224; y += 8) {
+						if (gy + h + 1 <= y) break;
+						if (y == 216) time -= 9;
+						if (gy >= y + 8) {
+							time += 4 + (y != 216);
+							continue;
+						}
+
+						bool start = gy >= y;
+						bool end = gy + h + 1 <= y + 8;
+						time += start ? 12 : (end ? 13 : 16);
+						if (y == 0 && !start) time += 6 - 2 * !end;
+
+						for (int yy = y; yy < y + 8; yy++) {
+							if (yy < gy) continue;
+							if (!start && yy >= gy + h + 1) break;
+
+							// account for hardware flaw that ors, rather than adds
+							int hofstl = params[(y - gy) * 2];
+							int hofstr = params[((y - gy) * 2) | 1];
+
+							int left = mx - mp - hofstl;
+							int right = mx + mp + hofstr;
+							int wstart = left < right ? left : right;
+							int wend = (left > right ? left : right) + w + 1;
+							int wtiles = (((wend + 7) & ~7) - (wstart & ~7)) >> 3;
+							time += 98 + 4 * wtiles;
+						}
+					}
+					break;
+				}
+				case 2: {
+					// affine world
+					time += 908;
+					for (int y = 0; y < 224; y += 8) {
+						if (gy + h + 1 <= y) break;
+						if (y == 216) time -= 12;
+						if (gy >= y + 8) {
+							time += 5 + 2 * (y == 216);
+							continue;
+						}
+
+						bool start = gy >= y;
+						bool end = gy + h + 1 <= y + 8;
+
+						time += start ? 13 : 14;
+
+						if (y == 0 && !start) time += 5;
+						if (y == 216 && gy + h + 1 > y + 8) time += 3;
+
+						int startrow = gy;
+						if (startrow < y) startrow = y;
+						else if (startrow > y + 8) startrow = y + 8;
+
+						int endrow = gy + h + 1;
+						if (endrow < y) endrow = y;
+						else if (endrow > y + 8) endrow = y + 8;
+
+						int rows = endrow - startrow;
+						time += rows * (80 + 4 * (w + 1));
+					}
+					break;
+				}
+			}
+		} else {
+			// object world
+			time += 757;
+			if (object_group_id < 0) {
+				object_group_id = 3;
+				time += 28896;
+			}
+			int start_index = object_group_id == 0 ? 1023 : (vb_state->tVIPREG.SPT[object_group_id - 1]) & 1023;
+			int i = vb_state->tVIPREG.SPT[object_group_id] & 1023;
+			do {
+				u8 *obj_y_ptr = (u8 *)(vb_state->V810_DISPLAY_RAM.off + 0x0003E004 + 8 * i);
+				int y = *obj_y_ptr;
+				if (y > 0xf0) time += 27 + 43 + 5 + 2 * ((y + 8) & 0xff);
+				else if (y >= 0xe0) time += 28;
+				else if (y > 0xd8) time += 27 + 43 + 2 * (0xe0 - y);
+				else if ((y & 7) == 0) time += 27 + 43 + 2 * 8;
+				else time += 26 + 43 + 5 + 43 + 2 * 8;
+			} while (i = (i - 1) & 1023, i != start_index);
+		}
+	}
+	// The title screen animation in Zero Racers has two fullscreen affine layers,
+	// which in theory takes just 4141 cycles under 2 display frames.
+	// However, based on hardware recordings, it clearly takes 3 full frames.
+	// It's not currently clear what pushes it over the threshold.
+	// Therefore, we bump render time up a little so that it matches.
+	// If it takes just under 3 frames, screen tearing occurs.
+	if (CHECK_GAMEID("01VZRE") && time > 700000) {
+	    time += 5000;
+	}
+	return time;
+}
+
+
+void clearCache(void) {
+    int i;
+    tDSPCACHE.BgmPALMod = 1;                // World Palette Changed
+    tDSPCACHE.ObjPALMod = 1;                // Obj Palette Changed
+    tDSPCACHE.BrtPALMod = 1;                // Britness for Palette Changed
+    #ifdef NEED_OBJ_DATA_CACHE
+    tDSPCACHE.ObjDataCacheInvalid = 1;      // Object Cache Is invalid
+    #endif
+    tDSPCACHE.ObjCacheInvalid = 1;          // Object Cache Is invalid
+    #ifdef NEED_BG_CACHE
+    tDSPCACHE.BGCacheInvalid = -1;
+    #endif
+    for (i = 0; i < 2; i++) {
+		tDSPCACHE.DDSPDataState[i] = CPU_WROTE; // Direct Screen Draw changed
+		for (int j = 0; j < 64; j++) {
+			tDSPCACHE.SoftBufWrote[i][j].min = 0;
+			tDSPCACHE.SoftBufWrote[i][j].max = 31;
+		}
+	}
+	tDSPCACHE.CharCacheInvalid = true;
+	tDSPCACHE.CharCacheForceInvalid = true;
+	for (i = 0; i < 2048; i++)
+		tDSPCACHE.CharacterCache[i] = true;
+	tDSPCACHE.ColumnTableInvalid = true;
+}

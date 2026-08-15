@@ -1,0 +1,17 @@
+.out outpos dummy
+.out outtex dummy
+.out outcol dummy
+
+; workaround libctru#535
+; issue has been fixed, but workaround is retained for compat
+.constf const1(0.0, 0.0, 0.0, 0.0)
+
+; basic passthrough, no transforming at all
+
+.entry vmain_final
+.proc vmain_final
+    mov outpos, v0
+    mov outtex, v1
+    mov outcol, v2
+    end
+.end

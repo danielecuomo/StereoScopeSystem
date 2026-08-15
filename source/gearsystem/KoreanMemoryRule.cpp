@@ -1,0 +1,136 @@
+/*
+ * Gearsystem - Sega Master System / Game Gear Emulator
+ * Copyright (C) 2013  Ignacio Sanchez
+
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * any later version.
+
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU General Public License for more details.
+
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see http://www.gnu.org/licenses/
+ *
+ */
+
+#include "KoreanMemoryRule.h"
+#include "Memory.h"
+#include "Cartridge.h"
+
+KoreanMemoryRule::KoreanMemoryRule(Memory* pMemory, Cartridge* pCartridge, Input* pInput) : MemoryRule(pMemory, pCartridge, pInput)
+{
+    Reset();
+}
+
+KoreanMemoryRule::~KoreanMemoryRule()
+{
+}
+
+u8 KoreanMemoryRule::PerformRead(u16 address)
+{
+    if (address < 0x8000)
+    {
+        // ROM page 0 and 1
+        int bank = (address >> 14) & m_iROMBankMask;
+        return m_pCartridge->GetROM()[(address & 0x3FFF) + (bank * 0x4000)];
+    }
+    else if (address < 0xC000)
+    {
+        return m_pCartridge->GetROM()[(address - 0x8000) + m_iMapperSlot2Address];
+    }
+    else
+    {
+        // RAM + RAM mirror
+        return m_pMemory->Retrieve(address);
+    }
+}
+
+void KoreanMemoryRule::PerformWrite(u16 address, u8 value)
+{
+    if (address < 0x8000)
+    {
+        // ROM page 0 and 1
+        Debug("--> ** Attempting to write on ROM address $%X %X", address, value);
+    }
+    else if (address < 0xC000)
+    {
+        if (address == 0xA000)
+        {
+            m_iMapperSlot2 = value & m_iROMBankMask;
+            m_iMapperSlot2Address = m_iMapperSlot2 * 0x4000;
+            TraceBankSwitch(address, value);
+        }
+        else
+        {
+            // ROM page 2
+            Debug("--> ** Attempting to write on ROM page 2 $%X %X", address, value);
+        }
+    }
+    else if (address < 0xE000)
+    {
+        // RAM
+        m_pMemory->Load(address, value);
+        m_pMemory->Load(address + 0x2000, value);
+    }
+    else
+    {
+        // RAM (mirror)
+        m_pMemory->Load(address, value);
+        m_pMemory->Load(address - 0x2000, value);
+    }
+}
+
+void KoreanMemoryRule::Reset()
+{
+    int bankCount = m_pCartridge->GetROMBankCount();
+    m_iROMBankMask = (bankCount > 0) ? (bankCount - 1) : 0;
+
+    m_iMapperSlot2 = 2 & m_iROMBankMask;
+    m_iMapperSlot2Address = m_iMapperSlot2 * 0x4000;
+}
+
+u8* KoreanMemoryRule::GetPage(int index)
+{
+    switch (index)
+    {
+        case 0:
+        case 1:
+            return m_pCartridge->GetROM() + ((index & m_iROMBankMask) * 0x4000);
+        case 2:
+            return m_pCartridge->GetROM() + m_iMapperSlot2Address;
+        default:
+            return NULL;
+    }
+}
+
+int KoreanMemoryRule::GetBank(int index)
+{
+    switch (index)
+    {
+        case 0:
+        case 1:
+            return index & m_iROMBankMask;
+        case 2:
+            return m_iMapperSlot2;
+        default:
+            return 0;
+    }
+}
+
+void KoreanMemoryRule::SaveState(std::ostream& stream)
+{
+    stream.write(reinterpret_cast<const char*> (&m_iMapperSlot2), sizeof(m_iMapperSlot2));
+    stream.write(reinterpret_cast<const char*> (&m_iMapperSlot2Address), sizeof(m_iMapperSlot2Address));
+}
+
+void KoreanMemoryRule::LoadState(std::istream& stream, int)
+{
+    using namespace std;
+
+    stream.read(reinterpret_cast<char*> (&m_iMapperSlot2), sizeof(m_iMapperSlot2));
+    stream.read(reinterpret_cast<char*> (&m_iMapperSlot2Address), sizeof(m_iMapperSlot2Address));
+}

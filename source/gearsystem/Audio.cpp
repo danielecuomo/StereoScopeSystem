@@ -1,0 +1,277 @@
+/*
+ * Gearsystem - Sega Master System / Game Gear Emulator
+ * Copyright (C) 2013  Ignacio Sanchez
+
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * any later version.
+
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU General Public License for more details.
+
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see http://www.gnu.org/licenses/
+ *
+ */
+
+#include "Audio.h"
+#include "Memory.h"
+#include "Cartridge.h"
+
+Audio::Audio(Cartridge * pCartridge)
+{
+    m_pCartridge = pCartridge;
+    m_ElapsedCycles = 0;
+    m_iSampleRate = GS_AUDIO_SAMPLE_RATE;
+    InitPointer(m_pYM2413);
+    InitPointer(m_pApu);
+    InitPointer(m_pBuffer);
+    InitPointer(m_pSampleBuffer);
+    InitPointer(m_pYM2413Buffer);
+    m_bPAL = false;
+    m_bYM2413Enabled = false;
+    m_bPSGEnabled = true;
+    m_bYM2413ForceDisabled = false;
+    m_bYM2413CartridgeNotSupported = false;
+    m_bMute = false;
+    m_master_volume = 1.0f;
+    m_psg_volume = 1.0f;
+    m_fm_volume = 1.0f;
+    m_bVgmRecordingEnabled = false;
+    for (int i = 0; i < 4; i++)
+    {
+        InitPointer(m_pDebugChannelBuffer[i]);
+        m_iDebugChannelSamples[i] = 0;
+    }
+}
+
+Audio::~Audio()
+{
+    SafeDelete(m_pYM2413);
+    SafeDelete(m_pApu);
+    SafeDelete(m_pBuffer);
+    SafeDeleteArray(m_pSampleBuffer);
+    SafeDeleteArray(m_pYM2413Buffer);
+    for (int i = 0; i < 4; i++)
+        SafeDeleteArray(m_pDebugChannelBuffer[i]);
+}
+
+void Audio::Init()
+{
+    m_pSampleBuffer = new blip_sample_t[GS_AUDIO_BUFFER_SIZE];
+
+    m_pApu = new Sms_Apu();
+    m_pBuffer = new Stereo_Buffer();
+
+    m_pBuffer->clock_rate(m_bPAL ? (m_pCartridge->IsSG1000() ? GS_MASTER_CLOCK_PAL_SG1000 : GS_MASTER_CLOCK_PAL) : GS_MASTER_CLOCK_NTSC);
+    m_pBuffer->set_sample_rate(m_iSampleRate);
+    //m_pBuffer->bass_freq(100);
+    m_pApu->output(m_pBuffer->center(), m_pBuffer->left(), m_pBuffer->right());
+    //m_pApu->treble_eq(-15.0);
+
+    m_pYM2413Buffer = new s16[GS_AUDIO_BUFFER_SIZE];
+
+    m_pYM2413 = new YM2413();
+    m_pYM2413->Init(m_bPAL ? (m_pCartridge->IsSG1000() ? GS_MASTER_CLOCK_PAL_SG1000 : GS_MASTER_CLOCK_PAL) : GS_MASTER_CLOCK_NTSC);
+
+    for (int i = 0; i < 4; i++)
+        m_pDebugChannelBuffer[i] = new blip_sample_t[GS_AUDIO_BUFFER_SIZE];
+}
+
+void Audio::Reset(bool bPAL)
+{
+    m_bPAL = bPAL;
+    m_bYM2413Enabled = false;
+    m_pYM2413->Enable(false);
+    m_bPSGEnabled = true;
+    m_pApu->reset(m_pCartridge->IsSG1000() && !m_pCartridge->IsSG1000II());
+    m_pApu->volume(1.0);
+    m_pBuffer->clear();
+    m_pBuffer->clock_rate(m_bPAL ? (m_pCartridge->IsSG1000() ? GS_MASTER_CLOCK_PAL_SG1000 : GS_MASTER_CLOCK_PAL) : GS_MASTER_CLOCK_NTSC);
+    m_pYM2413->Reset(m_bPAL ? (m_pCartridge->IsSG1000() ? GS_MASTER_CLOCK_PAL_SG1000 : GS_MASTER_CLOCK_PAL) : GS_MASTER_CLOCK_NTSC);
+    m_ElapsedCycles = 0;
+    m_bYM2413CartridgeNotSupported = (m_pCartridge->GetFeatures() & GS_DB_FEATURE_DISABLE_YM2413);
+    if (m_pApu->is_debug_enabled())
+    {
+        long clock = m_bPAL ? (m_pCartridge->IsSG1000() ? GS_MASTER_CLOCK_PAL_SG1000 : GS_MASTER_CLOCK_PAL) : GS_MASTER_CLOCK_NTSC;
+        m_pApu->init_debug_buffers(m_iSampleRate, clock);
+    }
+}
+
+void Audio::Mute(bool bMute)
+{
+    m_bMute = bMute;
+}
+
+bool Audio::IsYM2413OutputEnabled() const
+{
+    return m_bYM2413Enabled && !m_bYM2413ForceDisabled && !m_bYM2413CartridgeNotSupported;
+}
+
+void Audio::SyncYM2413State()
+{
+    bool ym2413_output_enabled = IsYM2413OutputEnabled();
+
+    m_pYM2413->Enable(ym2413_output_enabled);
+
+    if (ym2413_output_enabled && m_bPSGEnabled)
+        m_pApu->volume(0.8);
+    else
+        m_pApu->volume(1.0);
+}
+
+void Audio::EndFrame(s16* pSampleBuffer, int* pSampleCount)
+{
+    m_pApu->end_frame(m_ElapsedCycles);
+    m_pBuffer->end_frame(m_ElapsedCycles);
+
+    int psg_count = static_cast<int>(m_pBuffer->read_samples(m_pSampleBuffer, GS_AUDIO_BUFFER_SIZE));
+
+    if (m_pApu->is_debug_enabled())
+    {
+        for (int i = 0; i < 4; i++)
+            m_pApu->read_debug_samples(m_pDebugChannelBuffer[i], i, GS_AUDIO_BUFFER_SIZE, &m_iDebugChannelSamples[i]);
+    }
+
+    int fm_count = IsYM2413OutputEnabled() ? m_pYM2413->EndFrame(m_pYM2413Buffer) : m_pYM2413->EndFrame(nullptr);
+
+    if (IsValidPointer(pSampleBuffer) && IsValidPointer(pSampleCount))
+    {
+        bool ym2413_output_enabled = IsYM2413OutputEnabled();
+        int count = ym2413_output_enabled ? fm_count : psg_count;
+
+        *pSampleCount = count;
+
+        if (m_bMute || (m_master_volume <= 0.0f))
+        {
+            memset(pSampleBuffer, 0, sizeof(s16) * count);
+        }
+        else
+        {
+            for (int i=0; i<count; i++)
+            {
+                s32 mix = 0;
+
+                mix += (m_bPSGEnabled && psg_count > 0) ? (s32)(m_pSampleBuffer[(i >= psg_count) ? psg_count-1 : i] * m_psg_volume) : 0;
+                mix += ym2413_output_enabled ? (s32)(m_pYM2413Buffer[i] * m_fm_volume) : 0;
+                mix = (s32)((float)mix * m_master_volume);
+
+                if (mix > 32767)
+                    mix = 32767;
+                else if (mix < -32768)
+                    mix = -32768;
+
+                pSampleBuffer[i] = (s16)mix;
+            }
+        }
+
+#ifndef GS_DISABLE_VGMRECORDER
+        if (m_bVgmRecordingEnabled)
+            m_VgmRecorder.UpdateTiming(count / 2);
+#endif
+    }
+
+    m_ElapsedCycles = 0;
+}
+
+void Audio::DisableYM2413(bool bDisable)
+{
+    m_bYM2413ForceDisabled = bDisable;
+    SyncYM2413State();
+}
+
+void Audio::SaveState(std::ostream& stream)
+{
+    using namespace std;
+
+    stream.write(reinterpret_cast<const char*> (&m_ElapsedCycles), sizeof(m_ElapsedCycles));
+    stream.write(reinterpret_cast<const char*> (m_pSampleBuffer), sizeof(blip_sample_t) * GS_AUDIO_BUFFER_SIZE);
+    stream.write(reinterpret_cast<const char*> (&m_bYM2413Enabled), sizeof(m_bYM2413Enabled));
+    stream.write(reinterpret_cast<const char*> (&m_bPSGEnabled), sizeof(m_bPSGEnabled));
+    stream.write(reinterpret_cast<const char*> (m_pYM2413Buffer), sizeof(s16) * GS_AUDIO_BUFFER_SIZE);
+    m_pYM2413->SaveState(stream);
+    m_pApu->SaveState(stream);
+    m_pBuffer->SaveState(stream);
+}
+
+void Audio::LoadState(std::istream& stream, int version)
+{
+    using namespace std;
+
+    stream.read(reinterpret_cast<char*> (&m_ElapsedCycles), sizeof(m_ElapsedCycles));
+    stream.read(reinterpret_cast<char*> (m_pSampleBuffer), sizeof(blip_sample_t) * GS_AUDIO_BUFFER_SIZE);
+    stream.read(reinterpret_cast<char*> (&m_bYM2413Enabled), sizeof(m_bYM2413Enabled));
+    stream.read(reinterpret_cast<char*> (&m_bPSGEnabled), sizeof(m_bPSGEnabled));
+    stream.read(reinterpret_cast<char*> (m_pYM2413Buffer), sizeof(s16) * GS_AUDIO_BUFFER_SIZE);
+    m_pYM2413->LoadState(stream);
+
+    if (version >= 103)
+    {
+        m_pApu->LoadState(stream);
+        m_pBuffer->LoadState(stream);
+    }
+    else
+    {
+        m_pApu->reset(m_pCartridge->IsSG1000() && !m_pCartridge->IsSG1000II());
+        m_pBuffer->clear();
+        if (m_pApu->is_debug_enabled())
+        {
+            long clock = m_bPAL ? (m_pCartridge->IsSG1000() ? GS_MASTER_CLOCK_PAL_SG1000 : GS_MASTER_CLOCK_PAL) : GS_MASTER_CLOCK_NTSC;
+            m_pApu->init_debug_buffers(m_iSampleRate, clock);
+        }
+    }
+
+    SyncYM2413State();
+}
+
+void Audio::LoadStateV1(std::istream& stream)
+{
+    using namespace std;
+
+    stream.read(reinterpret_cast<char*> (&m_ElapsedCycles), sizeof(m_ElapsedCycles));
+    stream.seekg(sizeof(blip_sample_t) * GS_AUDIO_BUFFER_SIZE_V1, ios::cur);
+    memset(m_pSampleBuffer, 0, sizeof(blip_sample_t) * GS_AUDIO_BUFFER_SIZE);
+    stream.read(reinterpret_cast<char*> (&m_bYM2413Enabled), sizeof(m_bYM2413Enabled));
+    stream.read(reinterpret_cast<char*> (&m_bPSGEnabled), sizeof(m_bPSGEnabled));
+    stream.seekg(sizeof(s16) * GS_AUDIO_BUFFER_SIZE_V1, ios::cur);
+    memset(m_pYM2413Buffer, 0, sizeof(s16) * GS_AUDIO_BUFFER_SIZE);
+    m_pYM2413->LoadStateV1(stream);
+
+    m_pApu->reset(m_pCartridge->IsSG1000() && !m_pCartridge->IsSG1000II());
+    m_pApu->volume(1.0);
+    m_pBuffer->clear();
+    if (m_pApu->is_debug_enabled())
+    {
+        long clock = m_bPAL ? (m_pCartridge->IsSG1000() ? GS_MASTER_CLOCK_PAL_SG1000 : GS_MASTER_CLOCK_PAL) : GS_MASTER_CLOCK_NTSC;
+        m_pApu->init_debug_buffers(m_iSampleRate, clock);
+    }
+
+    SyncYM2413State();
+}
+
+bool Audio::StartVgmRecording(const char* file_path, int clock_rate, bool is_pal, bool has_ym2413)
+{
+    if (m_bVgmRecordingEnabled)
+        return false;
+
+    m_VgmRecorder.Start(file_path, clock_rate, is_pal, has_ym2413);
+    m_bVgmRecordingEnabled = m_VgmRecorder.IsRecording();
+    return m_bVgmRecordingEnabled;
+}
+
+void Audio::StopVgmRecording()
+{
+    if (m_bVgmRecordingEnabled)
+    {
+        m_VgmRecorder.Stop();
+        m_bVgmRecordingEnabled = false;
+    }
+}
+
+bool Audio::IsVgmRecording() const
+{
+    return m_bVgmRecordingEnabled;
+}

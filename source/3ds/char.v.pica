@@ -1,0 +1,40 @@
+.fvec posscale ; third and fourth elements must be -1 and 1
+.fvec palettes[8]
+.fvec offset
+
+.constf const2(0.03125, 0.015625, 0.0, 0.0)
+
+.constfa orients[4]
+.constfa (0, 0, 0.03125, 0.03125)
+.constfa (0, 0.03125, 0.03125, 0)
+.constfa (0.03125, 0, 0, 0.03125)
+.constfa (0.03125, 0.03125, 0, 0)
+.end
+
+; v0: (left,top) pos
+; v1: (left,top,palette,orient) texcoord
+
+.out outpos1 dummy ; transposed
+.out outtc0 dummy
+.out outpos2 dummy ; transposed
+
+.entry vmain_char
+.proc vmain_char
+    ; flips
+    mova a0.x, v1.w
+    ; position: 0..size -> -1..1
+    mov r0, posscale
+    mov r1, posscale
+    mad r0.xy, r0.xy, v0.xy, posscale.zz
+    add r0.xy, offset.xy, r0.xy
+    add r1.xy, orients[a0.x].yx, r0.yx
+    mov outpos1, r1
+    add r1.xy, orients[a0.x].wz, r0.yx
+    mov outpos2, r1
+    ; outtex: 0..size -> 0..1
+    mul r1, const2, v1
+    ; copy over palette id
+    mov r1.z, v1.z
+    mov outtc0, r1
+    end
+.end

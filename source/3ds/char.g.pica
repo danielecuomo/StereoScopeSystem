@@ -1,0 +1,79 @@
+.gsh point c0
+
+.fvec pal1tex[8] ; only x varies
+.fvec pal2tex[8]
+.fvec pal3col[8] ; full colour
+
+.constf const1(0.03125, 0.015625, 0.0, 0.0)
+
+; v0: top left pos (already transposed)
+; v1: xy: top left texcoord, z: palette
+; v2: bottom right pos (already transposed)
+
+.out outpos position
+.out outtc0 texcoord0
+.out outtc1 texcoord1
+.out outtc2 texcoord2
+.out outcol color
+
+.entry gmain_char
+.proc gmain_char
+    ; load palette index
+    mova a0.x, v1.z
+
+    ; top left
+    setemit 0
+    mov outpos, v0
+    mov outtc0, v1
+    mov outtc1, pal1tex[a0.x]
+    mov outtc2, pal2tex[a0.x]
+    mov outcol, pal3col[a0.x]
+    emit
+
+    ; top right
+    setemit 1
+    ; position: v2.x, v0.y
+    mov r0, v2
+    mov r0.y, v0.y
+    mov outpos, r0
+    ; texcoord: add 8 pixels to x (transposed -> y)
+    mov r1, v1
+    add r1.y, const1.y, r1.y
+    mov r1.x, v1.x
+    mov outtc0, r1
+    ; color
+    mov outtc1, pal1tex[a0.x]
+    mov outtc2, pal2tex[a0.x]
+    mov outcol, pal3col[a0.x]
+    emit
+
+    ; bottom right
+    setemit 2, prim
+    ; position: v0.x, v2.y
+    mov r0, v2
+    mov r0.x, v0.x
+    mov outpos, r0
+    ; texcoord: add 8 pixels to y (transposed -> x)
+    mov r1, v1
+    add r1.x, const1.x, r1.x
+    mov outtc0, r1
+    mov outtc1, pal1tex[a0.x]
+    mov outtc2, pal2tex[a0.x]
+    mov outcol, pal3col[a0.x]
+    emit
+
+    ; bottom left
+    setemit 0, prim inv
+    ; position: v2
+    mov outpos, v2
+    ; texcoord: take bottom right and add 8 pixels to x (transposed -> y)
+    add r1.y, const1.y, r1.y
+    mov outtc0, r1
+    ; color
+    mov outtc1, pal1tex[a0.x]
+    mov outtc2, pal2tex[a0.x]
+    mov outcol, pal3col[a0.x]
+    emit
+
+    end
+.end
