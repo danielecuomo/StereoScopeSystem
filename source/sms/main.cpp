@@ -506,6 +506,11 @@ static void bindInputs(GearsystemCore& core)
 
 int main(int argc, char* argv[])
 {
+    // These variables must be initialized before any possible goto cleanup;
+    // otherwise C++ rejects the jump as crossing their initialization.
+    bool firstRomSelection = true;
+    std::string romPath;
+
     gfxInitDefault();
     APT_SetAppCpuTimeLimit(89);
     osSetSpeedupEnable(true);
@@ -550,131 +555,152 @@ int main(int argc, char* argv[])
         }
     }
 
+    // Audio is shared by all ROM sessions. Initialize it once so returning
+    // to the browser with SELECT does not tear down/recreate NDSP.
+    initAudio();
+
+    while (aptMainLoop())
     {
-        std::string romPath;
         bool haveRom = false;
 
-        if (argc > 1 && argv[1] && isSmsFile(argv[1]))
+        if (firstRomSelection && argc > 1 && argv[1] && isSmsFile(argv[1]))
         {
             romPath = argv[1];
             haveRom = true;
         }
-        else if (loadBundledRom(romPath))
+        else if (firstRomSelection && loadBundledRom(romPath))
         {
             haveRom = true;
         }
         else
         {
+            // After SELECT, always return to the SD card browser so another
+            // ROM can be chosen instead of exiting the application.
             haveRom = chooseRom(romPath);
         }
+        firstRomSelection = false;
 
         if (!haveRom)
-            goto cleanup;
+            break;
 
         printf("\x1b[2J\x1b[HLoading:\n%s\n", romPath.c_str());
 
-        GearsystemCore core;
-        core.Init(GS_PIXEL_RGB565);
-
-        if (!core.LoadROM(romPath.c_str()))
         {
-            printf("\nFailed to load SMS ROM.\n");
-            printf("Press START to exit.\n");
-            while (aptMainLoop())
+            GearsystemCore core;
+            core.Init(GS_PIXEL_RGB565);
+
+            if (!core.LoadROM(romPath.c_str()))
             {
-                hidScanInput();
-                if (hidKeysDown() & KEY_START) break;
-                gspWaitForVBlank();
-            }
-            goto cleanup;
-        }
-
-        core.LoadRam();
-
-        GS_RuntimeInfo info = {};
-        core.GetRuntimeInfo(info);
-        if (info.screen_width != FB_W || info.screen_height != FB_H)
-        {
-            printf("\nUnsupported SMS video mode: %dx%d\n", info.screen_width, info.screen_height);
-            printf("This build expects the standard 256x192 mode.\n");
-            printf("Press START to exit.\n");
-            while (aptMainLoop())
-            {
-                hidScanInput();
-                if (hidKeysDown() & KEY_START) break;
-                gspWaitForVBlank();
-            }
-            goto cleanup;
-        }
-
-        GS_RuntimeInfo runtimeInfo = {};
-        core.GetRuntimeInfo(runtimeInfo);
-
-        initAudio();
-
-        s16 samples[AUDIO_SAMPLES_MAX] = {};
-
-        consoleClear();
-        printf("Red Viper SMS\n\n");
-        printf("A/B   = SMS buttons 1/2\n");
-        printf("START = Start\n");
-        printf("D-Pad = Direction\n");
-        printf("SELECT = Exit\n\n");
-        printf("%s\n", core.GetCartridge()->GetFileName());
-
-        while (aptMainLoop())
-        {
-            hidScanInput();
-            if (hidKeysDown() & KEY_SELECT)
-                break;
-
-            bindInputs(core);
-
-            int sampleCount = 0;
-            core.RunToVBlank(nullptr, samples, &sampleCount, nullptr);
-            core.GetVideo()->Render16bit(
-                core.GetVideo()->GetFrameBuffer(),
-                frameBuffer,
-                GS_PIXEL_RGB565,
-                FB_W * FB_H,
-                false);
-            pushAudio(samples, sampleCount);
-
-            const int eye = glassesEyeFromRegistry(core);
-            updateStereoDetection(eye);
-            if (!stereoActive)
-            {
-                updateEyeTexture(0);
-            }
-            else
-            {
-                updateEyeTexture(eye);
-            }
-
-            renderFrame(topLeft, topRight, videoTextureSlot);
-            videoTextureSlot = (videoTextureSlot + 1) % VIDEO_TEXTURE_SLOTS;
-
-            // PAL SMS runs at 50 Hz.  Pace the emulator explicitly rather
-            // than using SYNCDRAW, so display synchronization does not add a
-            // full frame of latency when the CPU finishes early.
-            static u64 nextFrameMs = 0;
-            const u64 nowMs = osGetTime();
-            const u64 framePeriodMs = (runtimeInfo.region == Region_PAL) ? 20 : 17;
-            if (nextFrameMs == 0 || nowMs > nextFrameMs + framePeriodMs)
-                nextFrameMs = nowMs + framePeriodMs;
-            else
-            {
-                if (nowMs < nextFrameMs)
+                printf("\nFailed to load SMS ROM.\n");
+                printf("Press START to return to the ROM browser.\n");
+                while (aptMainLoop())
                 {
-                    const u64 sleepMs = nextFrameMs - nowMs;
-                    if (sleepMs > 1) svcSleepThread((sleepMs - 1) * 1000000LL);
-                    while (osGetTime() < nextFrameMs) { }
+                    hidScanInput();
+                    if (hidKeysDown() & KEY_START) break;
+                    gspWaitForVBlank();
                 }
-                nextFrameMs += framePeriodMs;
+                continue;
             }
-        }
 
-        core.SaveRam();
+            core.LoadRam();
+
+            GS_RuntimeInfo info = {};
+            core.GetRuntimeInfo(info);
+            if (info.screen_width != FB_W || info.screen_height != FB_H)
+            {
+                printf("\nUnsupported SMS video mode: %dx%d\n", info.screen_width, info.screen_height);
+                printf("This build expects the standard 256x192 mode.\n");
+                printf("Press START to return to the ROM browser.\n");
+                while (aptMainLoop())
+                {
+                    hidScanInput();
+                    if (hidKeysDown() & KEY_START) break;
+                    gspWaitForVBlank();
+                }
+                continue;
+            }
+
+            GS_RuntimeInfo runtimeInfo = {};
+            core.GetRuntimeInfo(runtimeInfo);
+
+            s16 samples[AUDIO_SAMPLES_MAX] = {};
+
+            // Reset per-ROM stereo detection when a new cartridge starts.
+            stereoActive = false;
+            previousGlassesEye = -1;
+            display3DEnabled = false;
+            gfxSet3D(false);
+
+            consoleClear();
+            printf("Red Viper SMS\n\n");
+            printf("A/B   = SMS buttons 1/2\n");
+            printf("START = Start\n");
+            printf("D-Pad = Direction\n");
+            printf("SELECT = ROM browser\n\n");
+            printf("%s\n", core.GetCartridge()->GetFileName());
+
+            bool returnToBrowser = false;
+            u64 nextFrameMs = 0;
+            while (aptMainLoop())
+            {
+                hidScanInput();
+                if (hidKeysDown() & KEY_SELECT)
+                {
+                    returnToBrowser = true;
+                    break;
+                }
+
+                bindInputs(core);
+
+                int sampleCount = 0;
+                core.RunToVBlank(nullptr, samples, &sampleCount, nullptr);
+                core.GetVideo()->Render16bit(
+                    core.GetVideo()->GetFrameBuffer(),
+                    frameBuffer,
+                    GS_PIXEL_RGB565,
+                    FB_W * FB_H,
+                    false);
+                pushAudio(samples, sampleCount);
+
+                const int eye = glassesEyeFromRegistry(core);
+                updateStereoDetection(eye);
+                if (!stereoActive)
+                {
+                    updateEyeTexture(0);
+                }
+                else
+                {
+                    updateEyeTexture(eye);
+                }
+
+                renderFrame(topLeft, topRight, videoTextureSlot);
+                videoTextureSlot = (videoTextureSlot + 1) % VIDEO_TEXTURE_SLOTS;
+
+                // PAL SMS runs at 50 Hz. Pace the emulator explicitly rather
+                // than using SYNCDRAW, so display synchronization does not add
+                // a full frame of latency when the CPU finishes early.
+                const u64 nowMs = osGetTime();
+                const u64 framePeriodMs = (runtimeInfo.region == Region_PAL) ? 20 : 17;
+                if (nextFrameMs == 0 || nowMs > nextFrameMs + framePeriodMs)
+                    nextFrameMs = nowMs + framePeriodMs;
+                else
+                {
+                    if (nowMs < nextFrameMs)
+                    {
+                        const u64 sleepMs = nextFrameMs - nowMs;
+                        if (sleepMs > 1) svcSleepThread((sleepMs - 1) * 1000000LL);
+                        while (osGetTime() < nextFrameMs) { }
+                    }
+                    nextFrameMs += framePeriodMs;
+                }
+            }
+
+            // Persist the current cartridge before returning to the browser.
+            core.SaveRam();
+
+            if (!returnToBrowser)
+                break;
+        }
     }
 
 cleanup:
