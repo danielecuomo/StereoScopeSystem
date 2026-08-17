@@ -1,4 +1,4 @@
-main.o: /Users/dacuomo/Downloads/work_hotops_safe6/source/sms/main.cpp \
+main.o: /Users/dacuomo/Downloads/work_hotops_safe8/source/sms/main.cpp \
  /opt/devkitpro/libctru/include/3ds.h \
  /opt/devkitpro/libctru/include/3ds/types.h \
  /opt/devkitpro/libctru/include/3ds/result.h \
@@ -110,26 +110,26 @@ main.o: /Users/dacuomo/Downloads/work_hotops_safe6/source/sms/main.cpp \
  /opt/devkitpro/libctru/include/c2d/sprite.h \
  /opt/devkitpro/libctru/include/c2d/text.h \
  /opt/devkitpro/libctru/include/c2d/font.h \
- /Users/dacuomo/Downloads/work_hotops_safe6/source/gearsystem/GearsystemCore.h \
- /Users/dacuomo/Downloads/work_hotops_safe6/source/gearsystem/definitions.h \
- /Users/dacuomo/Downloads/work_hotops_safe6/source/gearsystem/Cartridge.h \
- /Users/dacuomo/Downloads/work_hotops_safe6/source/gearsystem/game_db.h \
- /Users/dacuomo/Downloads/work_hotops_safe6/source/gearsystem/Video.h \
- /Users/dacuomo/Downloads/work_hotops_safe6/source/gearsystem/Processor.h \
- /Users/dacuomo/Downloads/work_hotops_safe6/source/gearsystem/SixteenBitRegister.h \
- /Users/dacuomo/Downloads/work_hotops_safe6/source/gearsystem/Memory.h \
- /Users/dacuomo/Downloads/work_hotops_safe6/source/gearsystem/log.h \
- /Users/dacuomo/Downloads/work_hotops_safe6/source/gearsystem/MemoryRule.h \
- /Users/dacuomo/Downloads/work_hotops_safe6/source/gearsystem/TraceLogger.h \
- /Users/dacuomo/Downloads/work_hotops_safe6/source/gearsystem/Memory_inline.h \
- /Users/dacuomo/Downloads/work_hotops_safe6/source/gearsystem/Processor.h \
- /Users/dacuomo/Downloads/work_hotops_safe6/source/gearsystem/SegaMemoryRule.h \
- /Users/dacuomo/Downloads/work_hotops_safe6/source/gearsystem/SegaMemoryRule_inline.h \
- /Users/dacuomo/Downloads/work_hotops_safe6/source/gearsystem/Processor_inline.h \
- /Users/dacuomo/Downloads/work_hotops_safe6/source/gearsystem/IOPorts.h \
- /Users/dacuomo/Downloads/work_hotops_safe6/source/gearsystem/Input.h \
- /Users/dacuomo/Downloads/work_hotops_safe6/source/gearsystem/definitions.h \
- /Users/dacuomo/Downloads/work_hotops_safe6/source/gearsystem/log.h
+ /Users/dacuomo/Downloads/work_hotops_safe8/source/gearsystem/GearsystemCore.h \
+ /Users/dacuomo/Downloads/work_hotops_safe8/source/gearsystem/definitions.h \
+ /Users/dacuomo/Downloads/work_hotops_safe8/source/gearsystem/Cartridge.h \
+ /Users/dacuomo/Downloads/work_hotops_safe8/source/gearsystem/game_db.h \
+ /Users/dacuomo/Downloads/work_hotops_safe8/source/gearsystem/Video.h \
+ /Users/dacuomo/Downloads/work_hotops_safe8/source/gearsystem/Processor.h \
+ /Users/dacuomo/Downloads/work_hotops_safe8/source/gearsystem/SixteenBitRegister.h \
+ /Users/dacuomo/Downloads/work_hotops_safe8/source/gearsystem/Memory.h \
+ /Users/dacuomo/Downloads/work_hotops_safe8/source/gearsystem/log.h \
+ /Users/dacuomo/Downloads/work_hotops_safe8/source/gearsystem/MemoryRule.h \
+ /Users/dacuomo/Downloads/work_hotops_safe8/source/gearsystem/TraceLogger.h \
+ /Users/dacuomo/Downloads/work_hotops_safe8/source/gearsystem/Memory_inline.h \
+ /Users/dacuomo/Downloads/work_hotops_safe8/source/gearsystem/Processor.h \
+ /Users/dacuomo/Downloads/work_hotops_safe8/source/gearsystem/SegaMemoryRule.h \
+ /Users/dacuomo/Downloads/work_hotops_safe8/source/gearsystem/SegaMemoryRule_inline.h \
+ /Users/dacuomo/Downloads/work_hotops_safe8/source/gearsystem/Processor_inline.h \
+ /Users/dacuomo/Downloads/work_hotops_safe8/source/gearsystem/IOPorts.h \
+ /Users/dacuomo/Downloads/work_hotops_safe8/source/gearsystem/Input.h \
+ /Users/dacuomo/Downloads/work_hotops_safe8/source/gearsystem/definitions.h \
+ /Users/dacuomo/Downloads/work_hotops_safe8/source/gearsystem/log.h
 /opt/devkitpro/libctru/include/3ds.h:
 /opt/devkitpro/libctru/include/3ds/types.h:
 /opt/devkitpro/libctru/include/3ds/result.h:
@@ -241,23 +241,23 @@ main.o: /Users/dacuomo/Downloads/work_hotops_safe6/source/sms/main.cpp \
 /opt/devkitpro/libctru/include/c2d/sprite.h:
 /opt/devkitpro/libctru/include/c2d/text.h:
 /opt/devkitpro/libctru/include/c2d/font.h:
-/Users/dacuomo/Downloads/work_hotops_safe6/source/gearsystem/GearsystemCore.h:
-/Users/dacuomo/Downloads/work_hotops_safe6/source/gearsystem/definitions.h:
-/Users/dacuomo/Downloads/work_hotops_safe6/source/gearsystem/Cartridge.h:
-/Users/dacuomo/Downloads/work_hotops_safe6/source/gearsystem/game_db.h:
-/Users/dacuomo/Downloads/work_hotops_safe6/source/gearsystem/Video.h:
-/Users/dacuomo/Downloads/work_hotops_safe6/source/gearsystem/Processor.h:
-/Users/dacuomo/Downloads/work_hotops_safe6/source/gearsystem/SixteenBitRegister.h:
-/Users/dacuomo/Downloads/work_hotops_safe6/source/gearsystem/Memory.h:
-/Users/dacuomo/Downloads/work_hotops_safe6/source/gearsystem/log.h:
-/Users/dacuomo/Downloads/work_hotops_safe6/source/gearsystem/MemoryRule.h:
-/Users/dacuomo/Downloads/work_hotops_safe6/source/gearsystem/TraceLogger.h:
-/Users/dacuomo/Downloads/work_hotops_safe6/source/gearsystem/Memory_inline.h:
-/Users/dacuomo/Downloads/work_hotops_safe6/source/gearsystem/Processor.h:
-/Users/dacuomo/Downloads/work_hotops_safe6/source/gearsystem/SegaMemoryRule.h:
-/Users/dacuomo/Downloads/work_hotops_safe6/source/gearsystem/SegaMemoryRule_inline.h:
-/Users/dacuomo/Downloads/work_hotops_safe6/source/gearsystem/Processor_inline.h:
-/Users/dacuomo/Downloads/work_hotops_safe6/source/gearsystem/IOPorts.h:
-/Users/dacuomo/Downloads/work_hotops_safe6/source/gearsystem/Input.h:
-/Users/dacuomo/Downloads/work_hotops_safe6/source/gearsystem/definitions.h:
-/Users/dacuomo/Downloads/work_hotops_safe6/source/gearsystem/log.h:
+/Users/dacuomo/Downloads/work_hotops_safe8/source/gearsystem/GearsystemCore.h:
+/Users/dacuomo/Downloads/work_hotops_safe8/source/gearsystem/definitions.h:
+/Users/dacuomo/Downloads/work_hotops_safe8/source/gearsystem/Cartridge.h:
+/Users/dacuomo/Downloads/work_hotops_safe8/source/gearsystem/game_db.h:
+/Users/dacuomo/Downloads/work_hotops_safe8/source/gearsystem/Video.h:
+/Users/dacuomo/Downloads/work_hotops_safe8/source/gearsystem/Processor.h:
+/Users/dacuomo/Downloads/work_hotops_safe8/source/gearsystem/SixteenBitRegister.h:
+/Users/dacuomo/Downloads/work_hotops_safe8/source/gearsystem/Memory.h:
+/Users/dacuomo/Downloads/work_hotops_safe8/source/gearsystem/log.h:
+/Users/dacuomo/Downloads/work_hotops_safe8/source/gearsystem/MemoryRule.h:
+/Users/dacuomo/Downloads/work_hotops_safe8/source/gearsystem/TraceLogger.h:
+/Users/dacuomo/Downloads/work_hotops_safe8/source/gearsystem/Memory_inline.h:
+/Users/dacuomo/Downloads/work_hotops_safe8/source/gearsystem/Processor.h:
+/Users/dacuomo/Downloads/work_hotops_safe8/source/gearsystem/SegaMemoryRule.h:
+/Users/dacuomo/Downloads/work_hotops_safe8/source/gearsystem/SegaMemoryRule_inline.h:
+/Users/dacuomo/Downloads/work_hotops_safe8/source/gearsystem/Processor_inline.h:
+/Users/dacuomo/Downloads/work_hotops_safe8/source/gearsystem/IOPorts.h:
+/Users/dacuomo/Downloads/work_hotops_safe8/source/gearsystem/Input.h:
+/Users/dacuomo/Downloads/work_hotops_safe8/source/gearsystem/definitions.h:
+/Users/dacuomo/Downloads/work_hotops_safe8/source/gearsystem/log.h:

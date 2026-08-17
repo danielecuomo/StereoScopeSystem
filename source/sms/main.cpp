@@ -504,6 +504,65 @@ static void bindInputs(GearsystemCore& core)
     setKey(KEY_START, Key_Start);
 }
 
+
+static bool isLineOfFire(GearsystemCore& core)
+{
+    Cartridge* cartridge = core.GetCartridge();
+    if (!cartridge || !cartridge->IsValidROM())
+        return false;
+
+    const u8* rom = cartridge->GetROM();
+    const int romSize = cartridge->GetROMSize();
+
+    // SMS header locations supported by Gearsystem.
+    const int headerLocations[] = { 0x7FF0, 0x1FF0, 0x3FF0 };
+
+    for (int header : headerLocations)
+    {
+        if (header + 0x10 <= romSize &&
+            rom[header]     == 'T' &&
+            rom[header + 1] == 'M' &&
+            rom[header + 2] == 'R' &&
+            rom[header + 3] == ' ' &&
+            rom[header + 4] == 'S' &&
+            rom[header + 5] == 'E' &&
+            rom[header + 6] == 'G' &&
+            rom[header + 7] == 'A')
+        {
+            // Product code is stored in the two bytes immediately after
+            // the "TMR SEGA" signature and two reserved bytes.
+            const u16 productCode =
+                (static_cast<u16>(rom[header + 0x0A]) << 8) |
+                static_cast<u16>(rom[header + 0x0B]);
+
+            // Line of Fire: product code DB85.
+            return productCode == 0xDB85;
+        }
+    }
+
+    return false;
+}
+
+static void enableLineOfFire3D(GearsystemCore& core)
+{
+    Cartridge* cartridge = core.GetCartridge();
+    if (!cartridge)
+        return;
+
+    u8* rom = cartridge->GetROM();
+    const int romSize = cartridge->GetROMSize();
+
+    // Line of Fire's 3-D boot check is at ROM offset 0x03BC.
+    // Replacing JP Z (0xCA) with JP NZ (0xC2) bypasses the
+    // requirement to hold buttons 1+2 during power-on.
+    if (romSize > 0x03BC && rom[0x03BC] == 0xCA)
+    {
+        rom[0x03BC] = 0xC2;
+        core.ResetROM();
+        printf("Line of Fire detected (Product Code DB85): 3-D enabled automatically.\n");
+    }
+}
+
 int main(int argc, char* argv[])
 {
     // These variables must be initialized before any possible goto cleanup;
@@ -601,6 +660,9 @@ int main(int argc, char* argv[])
                 }
                 continue;
             }
+
+            if (isLineOfFire(core))
+                enableLineOfFire3D(core);
 
             core.LoadRam();
 
