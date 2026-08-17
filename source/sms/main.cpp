@@ -15,6 +15,7 @@
 #include "Input.h"
 #include "definitions.h"
 #include "log.h"
+#include "menu_cartridge_data.h"
 
 bool g_mcp_stdio_mode = false;
 
@@ -43,6 +44,11 @@ static bool stereoActive = false;
 static int previousGlassesEye = -1;
 static bool display3DEnabled = false;
 static C3D_RenderTarget* menuTarget = nullptr;
+static C3D_Tex menuIconTex;
+static Tex3DS_SubTexture menuIconSubTex;
+static C2D_Image menuIconImage;
+static u16* menuIconUploadBuffer = nullptr;
+static bool menuIconInitialized = false;
 
 struct GameShortcut
 {
@@ -206,31 +212,161 @@ static void printFrameDiagnostics(const FrameDiagnostics& d, GS_Region region, c
 }
 #endif
 
+static void initMenuIcon()
+{
+    if (!C3D_TexInit(&menuIconTex, 64, 128, GPU_RGB565))
+        return;
+
+    menuIconUploadBuffer = (u16*)linearAlloc(sizeof(u16) * 64 * 128);
+    if (!menuIconUploadBuffer)
+    {
+        C3D_TexDelete(&menuIconTex);
+        return;
+    }
+
+    // C3D textures use 8x8 tiled/swizzled blocks. Keep the source artwork
+    // in a simple linear RGB565 array and swizzle it once at startup.
+    static const u8 swizzle[64] = {
+        0,1,2,3,8,9,10,11,
+        4,5,6,7,12,13,14,15,
+        16,17,18,19,24,25,26,27,
+        20,21,22,23,28,29,30,31,
+        32,33,34,35,40,41,42,43,
+        36,37,38,39,44,45,46,47,
+        48,49,50,51,56,57,58,59,
+        52,53,54,55,60,61,62,63
+    };
+
+    u16* dst = menuIconUploadBuffer;
+    for (int ty = 0; ty < 128; ty += 8)
+    {
+        for (int tx = 0; tx < 64; tx += 8)
+        {
+            for (int i = 0; i < 64; ++i)
+            {
+                const int p = swizzle[i];
+                const int y = ty + (p >> 3);
+                const int x = tx + (p & 7);
+                *dst++ = kMenuCartridgePixels[y * 64 + x];
+            }
+        }
+    }
+
+    C3D_TexUpload(&menuIconTex, menuIconUploadBuffer);
+    C3D_TexSetFilter(&menuIconTex, GPU_NEAREST, GPU_NEAREST);
+    C3D_TexFlush(&menuIconTex);
+
+    menuIconSubTex.width = 64;
+    menuIconSubTex.height = 47;
+    menuIconSubTex.left = 0.0f;
+    menuIconSubTex.top = 1.0f;
+    menuIconSubTex.right = 64.0f / 64.0f;
+    menuIconSubTex.bottom = 1.0f - 47.0f / 128.0f;
+    menuIconImage.tex = &menuIconTex;
+    menuIconImage.subtex = &menuIconSubTex;
+    menuIconInitialized = true;
+}
+
+static void freeMenuIcon()
+{
+    if (menuIconUploadBuffer)
+    {
+        linearFree(menuIconUploadBuffer);
+        menuIconUploadBuffer = nullptr;
+    }
+    if (menuIconInitialized)
+    {
+        C3D_TexDelete(&menuIconTex);
+        menuIconInitialized = false;
+    }
+}
+
+// Tiny 3x5 pixel font. It is deliberately rendered as rectangles so the
+// game names remain genuinely pixel/8-bit styled on the 3DS system font.
+static const u8* glyph3x5(char c)
+{
+    static const u8 blank[5] = {0,0,0,0,0};
+    static const u8 glyphs[][5] = {
+        /* A */ {0x2,0x5,0x7,0x5,0x5}, /* B */ {0x6,0x5,0x6,0x5,0x6},
+        /* C */ {0x3,0x4,0x4,0x4,0x3}, /* D */ {0x6,0x5,0x5,0x5,0x6},
+        /* E */ {0x7,0x4,0x6,0x4,0x7}, /* F */ {0x7,0x4,0x6,0x4,0x4},
+        /* G */ {0x3,0x4,0x5,0x5,0x3}, /* H */ {0x5,0x5,0x7,0x5,0x5},
+        /* I */ {0x7,0x2,0x2,0x2,0x7}, /* J */ {0x1,0x1,0x1,0x5,0x2},
+        /* K */ {0x5,0x5,0x6,0x5,0x5}, /* L */ {0x4,0x4,0x4,0x4,0x7},
+        /* M */ {0x5,0x7,0x7,0x5,0x5}, /* N */ {0x5,0x7,0x7,0x7,0x5},
+        /* O */ {0x2,0x5,0x5,0x5,0x2}, /* P */ {0x6,0x5,0x6,0x4,0x4},
+        /* Q */ {0x2,0x5,0x5,0x3,0x1}, /* R */ {0x6,0x5,0x6,0x5,0x5},
+        /* S */ {0x3,0x4,0x2,0x1,0x6}, /* T */ {0x7,0x2,0x2,0x2,0x2},
+        /* U */ {0x5,0x5,0x5,0x5,0x2}, /* V */ {0x5,0x5,0x5,0x5,0x2},
+        /* W */ {0x5,0x5,0x7,0x7,0x5}, /* X */ {0x5,0x5,0x2,0x5,0x5},
+        /* Y */ {0x5,0x5,0x2,0x2,0x2}, /* Z */ {0x7,0x1,0x2,0x4,0x7},
+        /* 0 */ {0x2,0x5,0x5,0x5,0x2}, /* 1 */ {0x2,0x6,0x2,0x2,0x7},
+        /* 2 */ {0x6,0x1,0x2,0x4,0x7}, /* 3 */ {0x6,0x1,0x2,0x1,0x6},
+        /* - */ {0x0,0x0,0x7,0x0,0x0}, /* . */ {0x0,0x0,0x0,0x0,0x2}
+    };
+    if (c >= 'A' && c <= 'Z') return glyphs[c - 'A'];
+    if (c >= '0' && c <= '3') return glyphs[26 + (c - '0')];
+    if (c == '-') return glyphs[30];
+    if (c == '.') return glyphs[31];
+    return blank;
+}
+
+static std::string menuTitle(const char* title)
+{
+    std::string s = title ? title : "";
+    for (char& c : s)
+        c = (char)std::toupper((unsigned char)c);
+
+    constexpr size_t maxChars = 13;
+    if (s.size() <= maxChars) return s;
+    if (maxChars <= 3) return s.substr(0, maxChars);
+    return s.substr(0, maxChars - 3) + "...";
+}
+
+static void drawPixelTitle(const char* title, int x, int y, int width)
+{
+    const std::string text = menuTitle(title);
+    constexpr int pixel = 1;
+    constexpr int charW = 3;
+    constexpr int charStep = 4;
+    const int totalW = (int)text.size() * charStep - 1;
+    int startX = x + (width - totalW) / 2;
+    // Red label occupies approximately y=2..12 in the 64x47 scaled cartridge.
+    const int startY = y + 4;
+
+    for (size_t n = 0; n < text.size(); ++n)
+    {
+        const u8* g = glyph3x5(text[n]);
+        const int gx = startX + (int)n * charStep;
+        for (int gy = 0; gy < 5; ++gy)
+        {
+            for (int col = 0; col < 3; ++col)
+            {
+                if (g[gy] & (1 << (2 - col)))
+                    C2D_DrawRectSolid((float)(gx + col * pixel), (float)(startY + gy * pixel),
+                                      0.0f, (float)pixel, (float)pixel,
+                                      C2D_Color32(255, 255, 255, 255));
+            }
+        }
+    }
+}
+
 static bool chooseRom(std::string& selected)
 {
     const std::vector<std::string> roms = findShortcutRoms();
     int selectedIndex = 0;
 
-    // Bottom screen is 320x240 in touch coordinates. Keep the tiles
-    // deliberately smaller, with black non-touch gaps around and between
-    // them. The exact same integer rectangles are used for drawing and
-    // touch hit-testing.
-    static constexpr int tileW = 56;
-    static constexpr int tileH = 72;
-    static constexpr int gapX = 16;
-    static constexpr int gapY = 16;
-    static constexpr int left = 24;
-    static constexpr int top = 40;
-
-    C2D_TextBuf textBuf = C2D_TextBufNew(256);
-    C2D_Text gameText[8];
-
-    for (int i = 0; i < 8; ++i)
-    {
-        char label[3] = { 'G', (char)('1' + i), '\0' };
-        C2D_TextParse(&gameText[i], textBuf, label);
-        C2D_TextOptimize(&gameText[i]);
-    }
+    // C2D screen targets use the normal 320x240 logical coordinate system on
+    // the bottom display. The physical framebuffer is rotated internally by
+    // the 3DS graphics pipeline; touch coordinates are also 320x240.
+    // Cartridge dimensions are derived from the supplied icon: 1182x871.
+    // Scaled to 64x47 on the native 320x240 bottom screen.
+    static constexpr int tileW = 64;
+    static constexpr int tileH = 47;
+    static constexpr int gapX = 12;
+    static constexpr int gapY = 12;
+    static constexpr int left = 14;
+    static constexpr int top = 67;
 
     auto tileRect = [](int index, int& x, int& y)
     {
@@ -250,29 +386,30 @@ static bool chooseRom(std::string& selected)
         {
             int x, y;
             tileRect(i, x, y);
-            const bool focused = selectedIndex == i;
-            const u32 fill = focused
-                ? C2D_Color32(48, 48, 48, 255)
-                : C2D_Color32(20, 20, 20, 255);
-            const u32 border = focused
-                ? C2D_Color32(255, 255, 255, 255)
-                : C2D_Color32(170, 170, 170, 255);
 
-            C2D_DrawRectSolid((float)x, (float)y, 0.0f,
-                              (float)tileW, (float)tileH, fill);
-            C2D_DrawRectSolid((float)x, (float)y, 0.0f,
-                              (float)tileW, 1.0f, border);
-            C2D_DrawRectSolid((float)x, (float)(y + tileH - 1), 0.0f,
-                              (float)tileW, 1.0f, border);
-            C2D_DrawRectSolid((float)x, (float)y, 0.0f,
-                              1.0f, (float)tileH, border);
-            C2D_DrawRectSolid((float)(x + tileW - 1), (float)y, 0.0f,
-                              1.0f, (float)tileH, border);
+            if (menuIconInitialized)
+                C2D_DrawImageAt(menuIconImage, (float)x, (float)y, 0.0f, nullptr, 1.0f, 1.0f);
 
-            C2D_DrawText(&gameText[i], C2D_AlignCenter | C2D_WithColor,
-                         x + tileW * 0.5f, y + tileH * 0.5f - 10.0f,
-                         0.0f, 0.72f, 0.72f,
-                         C2D_Color32(255, 255, 255, 255));
+            // Darken unavailable games while keeping the cartridge silhouette.
+            if (roms[i].empty())
+                C2D_DrawRectSolid((float)x, (float)y, 0.1f, (float)tileW, (float)tileH,
+                                  C2D_Color32(0, 0, 0, 150));
+
+            if (selectedIndex == i)
+            {
+                C2D_DrawRectSolid((float)x, (float)y, 0.2f, (float)tileW, 1.0f,
+                                  C2D_Color32(255, 255, 255, 255));
+                C2D_DrawRectSolid((float)x, (float)(y + tileH - 1), 0.2f, (float)tileW, 1.0f,
+                                  C2D_Color32(255, 255, 255, 255));
+                C2D_DrawRectSolid((float)x, (float)y, 0.2f, 1.0f, (float)tileH,
+                                  C2D_Color32(255, 255, 255, 255));
+                C2D_DrawRectSolid((float)(x + tileW - 1), (float)y, 0.2f, 1.0f, (float)tileH,
+                                  C2D_Color32(255, 255, 255, 255));
+            }
+
+            // The title is intentionally drawn over the red label of the
+            // cartridge rather than stored in eight separate image files.
+            drawPixelTitle(kSegaScopeGames[i].title, x, y, tileW);
         }
 
         C2D_Flush();
@@ -301,7 +438,6 @@ static bool chooseRom(std::string& selected)
         {
             touchPosition touch;
             hidTouchRead(&touch);
-
             for (int i = 0; i < 8; ++i)
             {
                 int x, y;
@@ -319,7 +455,6 @@ static bool chooseRom(std::string& selected)
         if (activate && !roms[selectedIndex].empty())
         {
             selected = roms[selectedIndex];
-            C2D_TextBufDelete(textBuf);
             return true;
         }
 
@@ -330,7 +465,6 @@ static bool chooseRom(std::string& selected)
         gspWaitForVBlank();
     }
 
-    C2D_TextBufDelete(textBuf);
     return false;
 }
 
@@ -600,21 +734,16 @@ int main(int argc, char* argv[])
     gfxSet3D(false);
     C3D_RenderTarget* topLeft = C2D_CreateScreenTarget(GFX_TOP, GFX_LEFT);
     C3D_RenderTarget* topRight = C2D_CreateScreenTarget(GFX_TOP, GFX_RIGHT);
-    // Do not use C2D_CreateScreenTarget() here. This project's bottom-screen
-    // pipeline uses the native 3DS RGB8 target dimensions and transfer flags
-    // (the physical framebuffer is 240x320, while touch coordinates are
-    // presented as 320x240). Using a 320x240 screen target causes the
-    // repeated/cropped tiles seen on hardware.
-    menuTarget = C3D_RenderTargetCreate(GSP_SCREEN_WIDTH, GSP_SCREEN_HEIGHT_BOTTOM, GPU_RB_RGB8, -1);
+    // Use Citro2D's native screen target for the bottom display. This keeps
+    // the logical 320x240 coordinate system aligned with hidTouchRead().
+    // The previous custom target exposed the physical 240x320 framebuffer
+    // dimensions directly, which caused the menu to repeat/crop on hardware.
+    menuTarget = C2D_CreateScreenTarget(GFX_BOTTOM, GFX_LEFT);
     if (!menuTarget)
     {
-        printf("Failed to allocate bottom-screen render target.\n");
+        printf("Failed to create bottom-screen target.\n");
         goto cleanup;
     }
-    C3D_RenderTargetSetOutput(menuTarget, GFX_BOTTOM, GFX_LEFT,
-        GX_TRANSFER_FLIP_VERT(0) | GX_TRANSFER_OUT_TILED(0) | GX_TRANSFER_RAW_COPY(0) |
-        GX_TRANSFER_IN_FORMAT(GX_TRANSFER_FMT_RGB8) | GX_TRANSFER_OUT_FORMAT(GX_TRANSFER_FMT_RGB8) |
-        GX_TRANSFER_SCALING(GX_TRANSFER_SCALE_NO));
 
     for (int i = 0; i < VIDEO_TEXTURE_SLOTS * 2; ++i)
     {
@@ -652,6 +781,8 @@ int main(int argc, char* argv[])
             gameImage[index].subtex = &gameSubTex[index];
         }
     }
+
+    initMenuIcon();
 
     // Audio is shared by all ROM sessions. Initialize it once so returning
     // to the browser with SELECT does not tear down/recreate NDSP.
@@ -805,6 +936,7 @@ int main(int argc, char* argv[])
     }
 
 cleanup:
+    freeMenuIcon();
     if (uploadBuffer) linearFree(uploadBuffer);
     if (frameBuffer) linearFree(frameBuffer);
 
