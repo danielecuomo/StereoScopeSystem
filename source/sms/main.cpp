@@ -53,34 +53,21 @@ static bool menuIconInitialized = false;
 struct GameShortcut
 {
     const char* title;
-    const char* aliases[5];
+    u16 productCode;
     const char* romPath;
 };
 
 static const GameShortcut kSegaScopeGames[8] =
 {
-    { "Blade Eagle 3-D",       { "bladeeagle3d", nullptr }, nullptr },
-    { "Line of Fire",          { "lineoffire", nullptr }, nullptr },
-    { "Maze Hunter 3-D",       { "mazehunter3d", nullptr }, nullptr },
-    { "Missile Defense 3-D",   { "missiledefense3d", nullptr }, nullptr },
-    { "Out Run 3-D",            { "outrun3d", nullptr }, nullptr },
-    { "Poseidon Wars 3-D",     { "poseidonwars3d", "poseidenwars3d", nullptr }, nullptr },
-    { "Space Harrier 3-D",     { "spaceharrier3d", nullptr }, nullptr },
-    { "Zaxxon 3-D",            { "zaxxon3d", nullptr }, nullptr }
+    { "Blade Eagle 3-D",       0xEDFB, nullptr },
+    { "Line of Fire",          0xDB85, nullptr },
+    { "Maze Hunter 3-D",       0x9387, nullptr },
+    { "Missile Defense 3-D",   0x154A, nullptr },
+    { "Out Run 3-D",            0x4358, nullptr },
+    { "Poseidon Wars 3-D",     0x3E00, nullptr },
+    { "Space Harrier 3-D",     0x4786, nullptr },
+    { "Zaxxon 3-D",            0x2767, nullptr }
 };
-
-static std::string normalizeName(const char* value)
-{
-    std::string out;
-    if (!value) return out;
-
-    for (const unsigned char* p = reinterpret_cast<const unsigned char*>(value); *p; ++p)
-    {
-        if (std::isalnum(*p))
-            out += (char)std::tolower(*p);
-    }
-    return out;
-}
 
 static std::string joinPath(const std::string& base, const std::string& name)
 {
@@ -97,15 +84,55 @@ static bool isSmsFile(const char* name)
     return strcasecmp(dot, ".sms") == 0;
 }
 
-static bool shortcutMatches(const GameShortcut& game, const char* filename)
+static bool readSmsProductCode(const std::string& path, u16& productCode)
 {
-    const std::string normalized = normalizeName(filename);
-    for (int i = 0; i < 5 && game.aliases[i]; ++i)
+    FILE* rom = fopen(path.c_str(), "rb");
+    if (!rom)
+        return false;
+
+    // The Sega header is normally at one of these offsets. Some ROM dumps
+    // carry a 512-byte copier/header prefix, so check both layouts.
+    static const long headerOffsets[] =
     {
-        if (normalized.find(game.aliases[i]) != std::string::npos)
-            return true;
+        0x7FF0, 0x1FF0, 0x3FF0,
+        0x81F0, 0x21F0, 0x41F0
+    };
+
+    unsigned char header[0x10];
+    bool found = false;
+
+    for (size_t i = 0; i < sizeof(headerOffsets) / sizeof(headerOffsets[0]); ++i)
+    {
+        if (fseek(rom, headerOffsets[i], SEEK_SET) != 0)
+            continue;
+
+        if (fread(header, 1, sizeof(header), rom) != sizeof(header))
+            continue;
+
+        if (memcmp(header, "TMR SEGA", 8) == 0)
+        {
+            // Sega SMS/GG product code occupies bytes 0x0A-0x0B of
+            // the 16-byte cartridge header.
+            productCode = (static_cast<u16>(header[0x0A]) << 8) |
+                          static_cast<u16>(header[0x0B]);
+            found = true;
+            break;
+        }
     }
-    return false;
+
+    fclose(rom);
+    return found;
+}
+
+static bool shortcutMatches(const GameShortcut& game, const std::string& path)
+{
+    u16 productCode = 0;
+    if (!readSmsProductCode(path, productCode))
+        return false;
+
+    // The menu title is independent of the filename. Identification is based
+    // exclusively on the product number stored in the ROM header.
+    return productCode == game.productCode;
 }
 
 static void scanShortcutDirectory(const std::string& path, std::vector<std::string>& found)
@@ -121,11 +148,13 @@ static void scanShortcutDirectory(const std::string& path, std::vector<std::stri
         if (!isSmsFile(ent->d_name))
             continue;
 
+        const std::string romPath = joinPath(path, ent->d_name);
+
         for (int i = 0; i < 8; ++i)
         {
-            if (found[i].empty() && shortcutMatches(kSegaScopeGames[i], ent->d_name))
+            if (found[i].empty() && shortcutMatches(kSegaScopeGames[i], romPath))
             {
-                found[i] = joinPath(path, ent->d_name);
+                found[i] = romPath;
                 break;
             }
         }
