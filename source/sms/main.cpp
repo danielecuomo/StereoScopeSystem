@@ -3,6 +3,7 @@
 #include <dirent.h>
 #include <sys/stat.h>
 #include <algorithm>
+#include <cctype>
 #include <cstdio>
 #include <cstring>
 #include <strings.h>
@@ -41,6 +42,101 @@ static bool textureInitialized = false;
 static bool stereoActive = false;
 static int previousGlassesEye = -1;
 static bool display3DEnabled = false;
+static C3D_RenderTarget* menuTarget = nullptr;
+
+struct GameShortcut
+{
+    const char* title;
+    const char* aliases[5];
+    const char* romPath;
+};
+
+static const GameShortcut kSegaScopeGames[8] =
+{
+    { "Blade Eagle 3-D",       { "bladeeagle3d", nullptr }, nullptr },
+    { "Line of Fire",          { "lineoffire", nullptr }, nullptr },
+    { "Maze Hunter 3-D",       { "mazehunter3d", nullptr }, nullptr },
+    { "Missile Defense 3-D",   { "missiledefense3d", nullptr }, nullptr },
+    { "Out Run 3-D",            { "outrun3d", nullptr }, nullptr },
+    { "Poseidon Wars 3-D",     { "poseidonwars3d", "poseidenwars3d", nullptr }, nullptr },
+    { "Space Harrier 3-D",     { "spaceharrier3d", nullptr }, nullptr },
+    { "Zaxxon 3-D",            { "zaxxon3d", nullptr }, nullptr }
+};
+
+static std::string normalizeName(const char* value)
+{
+    std::string out;
+    if (!value) return out;
+
+    for (const unsigned char* p = reinterpret_cast<const unsigned char*>(value); *p; ++p)
+    {
+        if (std::isalnum(*p))
+            out += (char)std::tolower(*p);
+    }
+    return out;
+}
+
+static std::string joinPath(const std::string& base, const std::string& name)
+{
+    if (base.empty()) return name;
+    if (base.back() == '/') return base + name;
+    return base + "/" + name;
+}
+
+static bool isSmsFile(const char* name)
+{
+    if (!name) return false;
+    const char* dot = strrchr(name, '.');
+    if (!dot) return false;
+    return strcasecmp(dot, ".sms") == 0;
+}
+
+static bool shortcutMatches(const GameShortcut& game, const char* filename)
+{
+    const std::string normalized = normalizeName(filename);
+    for (int i = 0; i < 5 && game.aliases[i]; ++i)
+    {
+        if (normalized.find(game.aliases[i]) != std::string::npos)
+            return true;
+    }
+    return false;
+}
+
+static void scanShortcutDirectory(const std::string& path, std::vector<std::string>& found)
+{
+    DIR* dir = opendir(path.c_str());
+    if (!dir) return;
+
+    struct dirent* ent;
+    while ((ent = readdir(dir)) != nullptr)
+    {
+        if (!strcmp(ent->d_name, ".") || !strcmp(ent->d_name, ".."))
+            continue;
+        if (!isSmsFile(ent->d_name))
+            continue;
+
+        for (int i = 0; i < 8; ++i)
+        {
+            if (found[i].empty() && shortcutMatches(kSegaScopeGames[i], ent->d_name))
+            {
+                found[i] = joinPath(path, ent->d_name);
+                break;
+            }
+        }
+    }
+
+    closedir(dir);
+}
+
+static std::vector<std::string> findShortcutRoms()
+{
+    // The ROM directory is fixed by the application layout. Do not scan the
+    // SD card or search recursively: this makes the menu open immediately.
+    static const char* romDirectory = "sdmc:/3ds/sms_roms";
+    std::vector<std::string> found(8);
+    scanShortcutDirectory(romDirectory, found);
+    return found;
+}
 
 struct FrameDiagnostics
 {
@@ -110,201 +206,131 @@ static void printFrameDiagnostics(const FrameDiagnostics& d, GS_Region region, c
 }
 #endif
 
-static std::string parentPath(const std::string& path)
-{
-    if (path == "sdmc:/") return path;
-    size_t p = path.find_last_of('/');
-    if (p == std::string::npos || p == 0) return "sdmc:/";
-    std::string out = path.substr(0, p);
-    if (out.size() < 6) out = "sdmc:/";
-    return out;
-}
-
-static std::string joinPath(const std::string& base, const std::string& name)
-{
-    if (base.empty()) return name;
-    if (base.back() == '/') return base + name;
-    return base + "/" + name;
-}
-
-static bool isDirectory(const std::string& path)
-{
-    struct stat st;
-    return stat(path.c_str(), &st) == 0 && S_ISDIR(st.st_mode);
-}
-
-static bool isSmsFile(const char* name)
-{
-    const char* dot = strrchr(name, '.');
-    if (!dot) return false;
-    return strcasecmp(dot, ".sms") == 0;
-}
-
-static std::vector<std::string> listEntries(const std::string& path)
-{
-    std::vector<std::string> entries;
-    entries.push_back("..");
-
-    DIR* dir = opendir(path.c_str());
-    if (!dir) return entries;
-
-    struct dirent* ent;
-    while ((ent = readdir(dir)) != nullptr)
-    {
-        if (!strcmp(ent->d_name, ".") || !strcmp(ent->d_name, ".."))
-            continue;
-
-        std::string full = path;
-        if (full.back() != '/') full += '/';
-        full += ent->d_name;
-
-        if (isDirectory(full) || isSmsFile(ent->d_name))
-            entries.push_back(ent->d_name);
-    }
-    closedir(dir);
-
-    std::sort(entries.begin() + 1, entries.end(),
-        [](const std::string& a, const std::string& b)
-        {
-            return strcasecmp(a.c_str(), b.c_str()) < 0;
-        });
-
-    return entries;
-}
-
 static bool chooseRom(std::string& selected)
 {
-    std::string path = "sdmc:/";
-    size_t selectedIndex = 0;
+    const std::vector<std::string> roms = findShortcutRoms();
+    int selectedIndex = 0;
 
-    // Cache the directory. The previous implementation called listEntries()
-    // on every input poll; on SD this is slow enough to make key presses appear
-    // to be ignored. We only rebuild the list when the directory changes.
-    std::vector<std::string> entries = listEntries(path);
-    bool redraw = true;
-    size_t drawnIndex = (size_t)-1;
+    // Bottom screen is 320x240 in touch coordinates. Keep the tiles
+    // deliberately smaller, with black non-touch gaps around and between
+    // them. The exact same integer rectangles are used for drawing and
+    // touch hit-testing.
+    static constexpr int tileW = 56;
+    static constexpr int tileH = 72;
+    static constexpr int gapX = 16;
+    static constexpr int gapY = 16;
+    static constexpr int left = 24;
+    static constexpr int top = 40;
 
-    auto reloadDirectory = [&]()
+    C2D_TextBuf textBuf = C2D_TextBufNew(256);
+    C2D_Text gameText[8];
+
+    for (int i = 0; i < 8; ++i)
     {
-        entries = listEntries(path);
-        selectedIndex = 0;
-        drawnIndex = (size_t)-1;
-        redraw = true;
+        char label[3] = { 'G', (char)('1' + i), '\0' };
+        C2D_TextParse(&gameText[i], textBuf, label);
+        C2D_TextOptimize(&gameText[i]);
+    }
+
+    auto tileRect = [](int index, int& x, int& y)
+    {
+        const int col = index % 4;
+        const int row = index / 4;
+        x = left + col * (tileW + gapX);
+        y = top + row * (tileH + gapY);
     };
 
     auto drawMenu = [&]()
     {
-        consoleClear();
-        printf("Red Viper SMS\n");
-        printf("Select a .sms ROM\n\n");
-        printf("%s\n", path.c_str());
+        C3D_FrameBegin(C3D_FRAME_SYNCDRAW);
+        C2D_TargetClear(menuTarget, C2D_Color32(0, 0, 0, 255));
+        C2D_SceneBegin(menuTarget);
 
-        const int first = (selectedIndex / 18) * 18;
-        const int last = std::min(first + 18, (int)entries.size());
-        for (int i = first; i < last; ++i)
+        for (int i = 0; i < 8; ++i)
         {
-            const bool cursor = (i == (int)selectedIndex);
-            const std::string& name = entries[i];
-            printf("%c %-37s%s\n", cursor ? '>' : ' ',
-                   name.c_str(), isDirectory(joinPath(path, name)) ? "/" : "");
+            int x, y;
+            tileRect(i, x, y);
+            const bool focused = selectedIndex == i;
+            const u32 fill = focused
+                ? C2D_Color32(48, 48, 48, 255)
+                : C2D_Color32(20, 20, 20, 255);
+            const u32 border = focused
+                ? C2D_Color32(255, 255, 255, 255)
+                : C2D_Color32(170, 170, 170, 255);
+
+            C2D_DrawRectSolid((float)x, (float)y, 0.0f,
+                              (float)tileW, (float)tileH, fill);
+            C2D_DrawRectSolid((float)x, (float)y, 0.0f,
+                              (float)tileW, 1.0f, border);
+            C2D_DrawRectSolid((float)x, (float)(y + tileH - 1), 0.0f,
+                              (float)tileW, 1.0f, border);
+            C2D_DrawRectSolid((float)x, (float)y, 0.0f,
+                              1.0f, (float)tileH, border);
+            C2D_DrawRectSolid((float)(x + tileW - 1), (float)y, 0.0f,
+                              1.0f, (float)tileH, border);
+
+            C2D_DrawText(&gameText[i], C2D_AlignCenter | C2D_WithColor,
+                         x + tileW * 0.5f, y + tileH * 0.5f - 10.0f,
+                         0.0f, 0.72f, 0.72f,
+                         C2D_Color32(255, 255, 255, 255));
         }
 
-        printf("\nA: open/select   B: parent   START: quit\n");
-        drawnIndex = selectedIndex;
-        redraw = false;
+        C2D_Flush();
+        C3D_FrameEnd(0);
     };
+
+    drawMenu();
 
     while (aptMainLoop())
     {
-        if (entries.empty())
-        {
-            if (redraw)
-            {
-                consoleClear();
-                printf("No entries in %s\n", path.c_str());
-                printf("\nB: parent   START: quit\n");
-                redraw = false;
-            }
-
-            hidScanInput();
-            const u32 down = hidKeysDown();
-            if (down & KEY_START) return false;
-            if (down & KEY_B)
-            {
-                path = parentPath(path);
-                reloadDirectory();
-            }
-            gspWaitForVBlank();
-            continue;
-        }
-
-        if (selectedIndex >= entries.size())
-        {
-            selectedIndex = entries.size() - 1;
-            redraw = true;
-        }
-
-        if (redraw)
-            drawMenu();
-
-        // Poll input exactly once per display frame. Crucially, no SD access and
-        // no consoleClear() occurs between hidScanInput() and handling the key.
         hidScanInput();
         const u32 down = hidKeysDown();
 
-        if (down & KEY_UP)
-        {
-            if (selectedIndex == 0) selectedIndex = entries.size() - 1;
-            else --selectedIndex;
-            redraw = true;
-        }
+        if (down & KEY_LEFT)
+            selectedIndex = (selectedIndex % 4 + 3) % 4 + (selectedIndex / 4) * 4;
+        else if (down & KEY_RIGHT)
+            selectedIndex = (selectedIndex % 4 + 1) % 4 + (selectedIndex / 4) * 4;
+        else if (down & KEY_UP)
+            selectedIndex = (selectedIndex + 4) % 8;
         else if (down & KEY_DOWN)
+            selectedIndex = (selectedIndex + 4) % 8;
+
+        bool activate = (down & KEY_A) != 0;
+
+        if (down & KEY_TOUCH)
         {
-            selectedIndex = (selectedIndex + 1) % entries.size();
-            redraw = true;
+            touchPosition touch;
+            hidTouchRead(&touch);
+
+            for (int i = 0; i < 8; ++i)
+            {
+                int x, y;
+                tileRect(i, x, y);
+                if (touch.px >= x && touch.px < x + tileW &&
+                    touch.py >= y && touch.py < y + tileH)
+                {
+                    selectedIndex = i;
+                    activate = true;
+                    break;
+                }
+            }
+        }
+
+        if (activate && !roms[selectedIndex].empty())
+        {
+            selected = roms[selectedIndex];
+            C2D_TextBufDelete(textBuf);
+            return true;
         }
 
         if (down & KEY_B)
-        {
-            path = parentPath(path);
-            reloadDirectory();
-        }
+            break;
 
-        if (down & KEY_A)
-        {
-            const std::string& name = entries[selectedIndex];
-            if (name == "..")
-            {
-                path = parentPath(path);
-                reloadDirectory();
-            }
-            else
-            {
-                const std::string full = joinPath(path, name);
-                if (isDirectory(full))
-                {
-                    path = full;
-                    reloadDirectory();
-                }
-                else if (isSmsFile(name.c_str()))
-                {
-                    selected = full;
-                    return true;
-                }
-            }
-        }
-
-        if (down & KEY_START) return false;
-
-        // Only redraw after the input has been processed. This prevents the
-        // visible flash on every command and keeps input handling independent
-        // from console rendering.
-        if (redraw)
-            drawMenu();
-
+        drawMenu();
         gspWaitForVBlank();
     }
 
+    C2D_TextBufDelete(textBuf);
     return false;
 }
 
@@ -567,8 +593,6 @@ int main(int argc, char* argv[])
     APT_SetAppCpuTimeLimit(89);
     osSetSpeedupEnable(true);
     romfsInit();
-    consoleInit(GFX_BOTTOM, nullptr);
-
     C3D_Init(C3D_DEFAULT_CMDBUF_SIZE);
     C2D_Init(C2D_DEFAULT_MAX_OBJECTS);
     C2D_Prepare();
@@ -576,6 +600,21 @@ int main(int argc, char* argv[])
     gfxSet3D(false);
     C3D_RenderTarget* topLeft = C2D_CreateScreenTarget(GFX_TOP, GFX_LEFT);
     C3D_RenderTarget* topRight = C2D_CreateScreenTarget(GFX_TOP, GFX_RIGHT);
+    // Do not use C2D_CreateScreenTarget() here. This project's bottom-screen
+    // pipeline uses the native 3DS RGB8 target dimensions and transfer flags
+    // (the physical framebuffer is 240x320, while touch coordinates are
+    // presented as 320x240). Using a 320x240 screen target causes the
+    // repeated/cropped tiles seen on hardware.
+    menuTarget = C3D_RenderTargetCreate(GSP_SCREEN_WIDTH, GSP_SCREEN_HEIGHT_BOTTOM, GPU_RB_RGB8, -1);
+    if (!menuTarget)
+    {
+        printf("Failed to allocate bottom-screen render target.\n");
+        goto cleanup;
+    }
+    C3D_RenderTargetSetOutput(menuTarget, GFX_BOTTOM, GFX_LEFT,
+        GX_TRANSFER_FLIP_VERT(0) | GX_TRANSFER_OUT_TILED(0) | GX_TRANSFER_RAW_COPY(0) |
+        GX_TRANSFER_IN_FORMAT(GX_TRANSFER_FMT_RGB8) | GX_TRANSFER_OUT_FORMAT(GX_TRANSFER_FMT_RGB8) |
+        GX_TRANSFER_SCALING(GX_TRANSFER_SCALE_NO));
 
     for (int i = 0; i < VIDEO_TEXTURE_SLOTS * 2; ++i)
     {
@@ -781,6 +820,8 @@ cleanup:
         for (int i = 0; i < VIDEO_TEXTURE_SLOTS * 2; ++i)
             C3D_TexDelete(&gameTex[i]);
     }
+    if (menuTarget) C3D_RenderTargetDelete(menuTarget);
+    menuTarget = nullptr;
     C2D_Fini();
     C3D_Fini();
     romfsExit();
