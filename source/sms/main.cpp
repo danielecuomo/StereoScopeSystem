@@ -347,8 +347,6 @@ static void pushAudio(const s16* samples, int count)
         count = AUDIO_SAMPLES_MAX;
 
     memcpy(audioBuffers[audioIndex], samples, sizeof(s16) * count);
-    if (count < AUDIO_SAMPLES_MAX)
-        memset(audioBuffers[audioIndex] + count, 0, sizeof(s16) * (AUDIO_SAMPLES_MAX - count));
 
     wave.nsamples = count / 2;
     DSP_FlushDataCache(audioBuffers[audioIndex], sizeof(s16) * count);
@@ -374,23 +372,18 @@ static void updateTexture(C3D_Tex& tex)
     const u16* src = reinterpret_cast<const u16*>(frameBuffer);
     u16* dst = uploadBuffer;
 
-    for (int ty = 0; ty < TEX_H; ty += 8)
+    // Only the 256x192 SMS framebuffer is rebuilt each frame. The lower 64
+    // texture rows are initialized once when uploadBuffer is allocated.
+    for (int ty = 0; ty < FB_H; ty += 8)
     {
         for (int tx = 0; tx < TEX_W; tx += 8)
         {
-            if (ty < FB_H)
+            for (int i = 0; i < 64; ++i)
             {
-                for (int i = 0; i < 64; ++i)
-                {
-                    const int p = swizzle[i];
-                    const int y = ty + (p >> 3);
-                    const int x = tx + (p & 7);
-                    dst[i] = (y < FB_H) ? src[y * FB_W + x] : 0;
-                }
-            }
-            else
-            {
-                memset(dst, 0, 64 * sizeof(u16));
+                const int p = swizzle[i];
+                const int y = ty + (p >> 3);
+                const int x = tx + (p & 7);
+                dst[i] = src[y * FB_W + x];
             }
             dst += 64;
         }
@@ -596,6 +589,13 @@ int main(int argc, char* argv[])
 
     textureInitialized = true;
     uploadBuffer = (u16*)linearAlloc(sizeof(u16) * TEX_W * TEX_H);
+    if (uploadBuffer)
+    {
+        // The SMS framebuffer occupies only the first 192 rows. Keep the
+        // unused 64 rows stable instead of clearing them on every frame.
+        memset(uploadBuffer + (FB_H * TEX_W), 0,
+               sizeof(u16) * TEX_W * (TEX_H - FB_H));
+    }
     frameBuffer = (u8*)linearAlloc(sizeof(u16) * GS_RESOLUTION_MAX_WIDTH_WITH_OVERSCAN * GS_RESOLUTION_MAX_HEIGHT_WITH_OVERSCAN);
 
     for (int slot = 0; slot < VIDEO_TEXTURE_SLOTS; ++slot)
