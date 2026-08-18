@@ -1,1 +1,0 @@
-void apply_patches();
