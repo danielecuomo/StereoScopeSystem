@@ -49,6 +49,8 @@ static Tex3DS_SubTexture menuIconSubTex;
 static C2D_Image menuIconImage;
 static u16* menuIconUploadBuffer = nullptr;
 static bool menuIconInitialized = false;
+static C2D_TextBuf gameInstructionsTextBuf = nullptr;
+static C2D_Text gameInstructionsText;
 
 struct GameShortcut
 {
@@ -171,6 +173,21 @@ static std::vector<std::string> findShortcutRoms()
     std::vector<std::string> found(8);
     scanShortcutDirectory(romDirectory, found);
     return found;
+}
+
+static const char* shortcutTitleForRom(const std::string& path)
+{
+    u16 productCode = 0;
+    if (readSmsProductCode(path, productCode))
+    {
+        for (const GameShortcut& game : kSegaScopeGames)
+        {
+            if (game.productCode == productCode)
+                return game.title;
+        }
+    }
+
+    return path.c_str();
 }
 
 struct FrameDiagnostics
@@ -308,6 +325,43 @@ static void freeMenuIcon()
         C3D_TexDelete(&menuIconTex);
         menuIconInitialized = false;
     }
+}
+
+static void setGameInstructions(const char* gameTitle, bool missileDefense3D)
+{
+    if (!gameInstructionsTextBuf)
+        return;
+
+    C2D_TextBufClear(gameInstructionsTextBuf);
+
+    char text[768];
+    if (missileDefense3D)
+    {
+        snprintf(text, sizeof(text),
+                 "%s\n\nCONTROLS\nD-PAD  Move\nA  Fire / Button 1\nB  Button 2\nTOUCH SCREEN  Aim\nSTART  Start\nSELECT  Game selection",
+                 gameTitle ? gameTitle : "GAME");
+    }
+    else
+    {
+        snprintf(text, sizeof(text),
+                 "%s\n\nCONTROLS\nD-PAD  Move\nA  Button 1\nB  Button 2\nSTART  Start\nSELECT  Game selection",
+                 gameTitle ? gameTitle : "GAME");
+    }
+
+    C2D_TextParse(&gameInstructionsText, gameInstructionsTextBuf, text);
+    C2D_TextOptimize(&gameInstructionsText);
+}
+
+static void drawGameInstructions()
+{
+    if (!menuTarget || !gameInstructionsTextBuf)
+        return;
+
+    C2D_TargetClear(menuTarget, C2D_Color32(0, 0, 0, 255));
+    C2D_SceneBegin(menuTarget);
+    C2D_DrawText(&gameInstructionsText, C2D_AlignCenter | C2D_WithColor,
+                 160.0f, 20.0f, 0.0f, 0.65f, 0.65f,
+                 C2D_Color32(255, 255, 255, 255));
 }
 
 // Tiny 3x5 pixel font. It is deliberately rendered as rectangles so the
@@ -582,7 +636,22 @@ static void updateTexture(C3D_Tex& tex)
     C3D_TexFlush(&tex);
 }
 
-static void renderFrame(C3D_RenderTarget* topLeft, C3D_RenderTarget* topRight, int slot)
+struct TouchPhaserState
+{
+    bool valid;
+    int x;
+    int y;
+};
+
+static void drawPhaserCrosshair(float cx, float cy, float depth)
+{
+    const u32 color = C2D_Color32(255, 255, 255, 255);
+    C2D_DrawRectSolid(cx - 8.0f, cy - 1.0f, depth, 16.0f, 2.0f, color);
+    C2D_DrawRectSolid(cx - 1.0f, cy - 8.0f, depth, 2.0f, 16.0f, color);
+}
+
+static void renderFrame(C3D_RenderTarget* topLeft, C3D_RenderTarget* topRight, int slot,
+                         bool missileDefense3D, const TouchPhaserState& touch)
 {
     // Non-blocking presentation keeps the emulator CPU from waiting on the
     // display.  Textures are triple-buffered per eye, so the CPU never
@@ -592,13 +661,25 @@ static void renderFrame(C3D_RenderTarget* topLeft, C3D_RenderTarget* topRight, i
     C2D_TargetClear(topLeft, C2D_Color32(0, 0, 0, 255));
     C2D_SceneBegin(topLeft);
     C2D_DrawImageAt(gameImage[slot * 2], 72.0f, 24.0f, 0.5f, nullptr, 1.0f, 1.0f);
+    if (missileDefense3D && touch.valid)
+        drawPhaserCrosshair(72.0f + static_cast<float>(touch.x),
+                            24.0f + static_cast<float>(touch.y), 0.6f);
 
     if (stereoActive)
     {
         C2D_TargetClear(topRight, C2D_Color32(0, 0, 0, 255));
         C2D_SceneBegin(topRight);
         C2D_DrawImageAt(gameImage[slot * 2 + 1], 72.0f, 24.0f, 0.5f, nullptr, 1.0f, 1.0f);
+        if (missileDefense3D && touch.valid)
+            drawPhaserCrosshair(72.0f + static_cast<float>(touch.x),
+                                24.0f + static_cast<float>(touch.y), 0.6f);
     }
+
+    // The bottom screen belongs to the launcher while a ROM is not running.
+    // Once a game starts, replace the launcher tiles with the controls for
+    // the active game so the player always has a useful second-screen UI.
+    drawGameInstructions();
+    C2D_Flush();
 
     C3D_FrameEnd(0);
 }
@@ -666,10 +747,11 @@ static bool loadBundledRom(std::string& path)
     return true;
 }
 
-static void bindInputs(GearsystemCore& core)
+static TouchPhaserState bindInputs(GearsystemCore& core, bool missileDefense3D)
 {
     hidScanInput();
     const u32 held = hidKeysHeld();
+    TouchPhaserState state = { false, 128, 96 };
 
     auto setKey = [&](u32 mask, GS_Keys key)
     {
@@ -681,11 +763,62 @@ static void bindInputs(GearsystemCore& core)
     setKey(KEY_DOWN, Key_Down);
     setKey(KEY_LEFT, Key_Left);
     setKey(KEY_RIGHT, Key_Right);
-    setKey(KEY_A, Key_1);
+
+    // Missile Defense 3-D only: touchscreen selects the Light Phaser aim
+    // point; A remains the trigger. All other games retain the original
+    // input path unchanged.
+    if (missileDefense3D)
+    {
+        if (held & KEY_TOUCH)
+        {
+            touchPosition touch;
+            hidTouchRead(&touch);
+            int x = static_cast<int>(touch.px) - 32;
+            int y = static_cast<int>(touch.py) - 24;
+            x = CLAMP(x, 0, FB_W - 1);
+            y = CLAMP(y, 0, FB_H - 1);
+            state = { true, x, y };
+            core.SetPhaser(x, y);
+        }
+        // Keep the last aimed position after lifting the finger.
+        static int lastX = 128;
+        static int lastY = 96;
+        if (state.valid)
+        {
+            lastX = state.x;
+            lastY = state.y;
+        }
+        core.SetPhaser(lastX, lastY);
+        setKey(KEY_A, Key_1);
+    }
+    else
+    {
+        setKey(KEY_A, Key_1);
+    }
     setKey(KEY_B, Key_2);
     setKey(KEY_START, Key_Start);
+    return state;
 }
 
+
+static bool isMissileDefense3D(GearsystemCore& core)
+{
+    Cartridge* cartridge = core.GetCartridge();
+    if (!cartridge || !cartridge->IsValidROM())
+        return false;
+
+    const u8* rom = cartridge->GetROM();
+    const int romSize = cartridge->GetROMSize();
+    const int headers[] = { 0x7FF0, 0x1FF0, 0x3FF0 };
+    for (int header : headers)
+    {
+        if (header + 0x0C > romSize) continue;
+        if (memcmp(rom + header, "TMR SEGA", 8) != 0) continue;
+        const u16 productCode = (static_cast<u16>(rom[header + 0x0A]) << 8) | rom[header + 0x0B];
+        if (productCode == 0x154A) return true;
+    }
+    return false;
+}
 
 static bool isLineOfFire(GearsystemCore& core)
 {
@@ -751,6 +884,8 @@ int main(int argc, char* argv[])
     // otherwise C++ rejects the jump as crossing their initialization.
     bool firstRomSelection = true;
     std::string romPath;
+    C3D_RenderTarget* topLeft = nullptr;
+    C3D_RenderTarget* topRight = nullptr;
 
     gfxInitDefault();
     APT_SetAppCpuTimeLimit(89);
@@ -759,10 +894,16 @@ int main(int argc, char* argv[])
     C3D_Init(C3D_DEFAULT_CMDBUF_SIZE);
     C2D_Init(C2D_DEFAULT_MAX_OBJECTS);
     C2D_Prepare();
+    gameInstructionsTextBuf = C2D_TextBufNew(1024);
+    if (!gameInstructionsTextBuf)
+    {
+        printf("Failed to allocate game instruction text buffer.\n");
+        goto cleanup;
+    }
 
     gfxSet3D(false);
-    C3D_RenderTarget* topLeft = C2D_CreateScreenTarget(GFX_TOP, GFX_LEFT);
-    C3D_RenderTarget* topRight = C2D_CreateScreenTarget(GFX_TOP, GFX_RIGHT);
+    topLeft = C2D_CreateScreenTarget(GFX_TOP, GFX_LEFT);
+    topRight = C2D_CreateScreenTarget(GFX_TOP, GFX_RIGHT);
     // Use Citro2D's native screen target for the bottom display. This keeps
     // the logical 320x240 coordinate system aligned with hidTouchRead().
     // The previous custom target exposed the physical 240x320 framebuffer
@@ -863,6 +1004,17 @@ int main(int argc, char* argv[])
             if (isLineOfFire(core))
                 enableLineOfFire3D(core);
 
+            const bool missileDefense3D = isMissileDefense3D(core);
+            if (missileDefense3D)
+            {
+                core.EnablePhaser(true);
+                core.SetPhaser(128, 96);
+                printf("Missile Defense 3-D detected (Product Code 8001).\n");
+                printf("Touch lower screen to aim; press A to fire.\n");
+            }
+
+            setGameInstructions(shortcutTitleForRom(romPath), missileDefense3D);
+
             core.LoadRam();
 
             GS_RuntimeInfo info = {};
@@ -902,6 +1054,7 @@ int main(int argc, char* argv[])
 
             bool returnToBrowser = false;
             u64 nextFrameMs = 0;
+            TouchPhaserState touchPhaser = { false, 128, 96 };
             while (aptMainLoop())
             {
                 hidScanInput();
@@ -911,7 +1064,7 @@ int main(int argc, char* argv[])
                     break;
                 }
 
-                bindInputs(core);
+                touchPhaser = bindInputs(core, missileDefense3D);
 
                 int sampleCount = 0;
                 core.RunToVBlank(nullptr, samples, &sampleCount, nullptr);
@@ -934,7 +1087,7 @@ int main(int argc, char* argv[])
                     updateEyeTexture(eye);
                 }
 
-                renderFrame(topLeft, topRight, videoTextureSlot);
+                renderFrame(topLeft, topRight, videoTextureSlot, missileDefense3D, touchPhaser);
                 videoTextureSlot = (videoTextureSlot + 1) % VIDEO_TEXTURE_SLOTS;
 
                 // PAL SMS runs at 50 Hz. Pace the emulator explicitly rather
@@ -983,6 +1136,11 @@ cleanup:
     }
     if (menuTarget) C3D_RenderTargetDelete(menuTarget);
     menuTarget = nullptr;
+    if (gameInstructionsTextBuf)
+    {
+        C2D_TextBufDelete(gameInstructionsTextBuf);
+        gameInstructionsTextBuf = nullptr;
+    }
     C2D_Fini();
     C3D_Fini();
     romfsExit();
