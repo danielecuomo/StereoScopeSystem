@@ -2,31 +2,26 @@
 
 Nintendo 3DS homebrew application for playing Sega Master System (`.sms`) ROMs, built around the Gearsystem emulation core.
 
-The application is currently identified in the build metadata as **Red Viper SMS** (`v1.3.2`) and includes support for stereoscopic/3D presentation features intended for compatible Sega 3-D titles.
-
 ## Features
 
 - Sega Master System emulation through the bundled Gearsystem core.
 - Nintendo 3DS native video and audio output using devkitPro/citro libraries.
 - Stereoscopic 3D rendering support for the 3DS.
-- ROM browser for `.sms` files.
 - Dedicated shortcuts for eight Sega 3-D titles, identified from the ROM's Sega product code rather than its filename:
-  - Blade Eagle 3-D
+  - Blade Eagle
   - Line of Fire
-  - Maze Hunter 3-D
-  - Missile Defense 3-D
-  - Out Run 3-D
-  - Poseidon Wars 3-D
-  - Space Harrier 3-D
-  - Zaxxon 3-D
-- Touchscreen aiming support for **Missile Defense 3-D**.
-- Optimized release build with LTO and section garbage collection.
+  - Maze Hunter
+  - Missile Defense
+  - Out Run
+  - Poseidon Wars
+  - Space Harrier
+  - Zaxxon
 
 ## Requirements
 
 Building requires a Nintendo 3DS homebrew development environment based on:
 
-- [devkitPro](https://devkitpro.org/)
+- devkitPro
 - devkitARM
 - `3ds-dev`
 - `3dstools`
@@ -77,19 +72,6 @@ sdmc:/3ds/sms_roms
 
 Only files with the `.sms` extension are considered.
 
-For the eight built-in 3-D shortcuts, identification is based on the Sega cartridge product code stored in the ROM header. The filename does not need to match the game title.
-
-Example SD card layout:
-
-```text
-SD:/3ds/sms_roms/
-├── game1.sms
-├── game2.sms
-└── ...
-```
-
-The application does not recursively scan the SD card.
-
 ## Controls
 
 ### ROM browser
@@ -98,7 +80,6 @@ The application does not recursively scan the SD card.
 |---|---|
 | D-Pad | Select ROM |
 | A | Launch selected ROM |
-| B | Exit browser |
 | Touchscreen | Select a ROM |
 
 ### In-game
@@ -111,37 +92,7 @@ The application does not recursively scan the SD card.
 | START | Start |
 | SELECT | Return to ROM browser |
 
-For **Missile Defense 3-D**, the touchscreen is used to control the Light Phaser aiming position and **A** acts as the trigger.
-
-## Project layout
-
-```text
-.
-├── Makefile
-├── icon.png
-├── resources/
-│   └── AppInfo
-├── romfs/
-├── scripts/
-│   ├── fetch-submodules
-│   ├── install-3DS-dev-packages
-│   └── install-devkitpro-pacman
-└── source/
-    ├── sms/
-    └── gearsystem/
-```
-
-Build products are intentionally excluded from version control. See `.gitignore`.
-
-## Version
-
-Current application version:
-
-```text
-v1.3.2
-```
-
-The build also embeds the short Git commit hash when the source tree is built from a Git repository.
+The Light Phaser for **Missile Defense** is currently not supported.
 
 ## Notes
 
