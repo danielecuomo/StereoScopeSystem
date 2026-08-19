@@ -108,7 +108,7 @@ inline u8 Input::GetPortDD()
     {
         dd = ((m_Joypad2 >> 2) & 0x0F) | 0xF0;
 
-        if (m_pVideo->IsPhaserDetected())
+        if (m_pVideo->IsPhaserTHLow())
             dd = UnsetBit(dd, 6);
     }
     else

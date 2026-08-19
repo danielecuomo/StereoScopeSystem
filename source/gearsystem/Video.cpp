@@ -22,6 +22,7 @@
 #include "Processor.h"
 #include "Cartridge.h"
 #include "TraceLogger.h"
+#include <math.h>
 
 Video::Video(Memory* pMemory, Processor* pProcessor, Cartridge* pCartridge)
 {
@@ -55,6 +56,10 @@ Video::Video(Memory* pMemory, Processor* pProcessor, Cartridge* pCartridge)
     m_Phaser.y = 0;
     m_Phaser.enabled = false;
     m_Phaser.detected = false;
+    m_Phaser.thLow = false;
+    m_Phaser.thEndCycle = 0;
+    m_Phaser.thLine = -1;
+    m_Phaser.thRemaining = 0;
     m_LineEvents.hint = false;
     m_LineEvents.scrollx = false;
     m_LineEvents.vcounter = false;
@@ -175,6 +180,10 @@ void Video::Reset(bool bGameGear, bool bPAL, int iGGASIC, bool bGameGearSMSMode)
     m_Phaser.y = 0;
     m_Phaser.enabled = false;
     m_Phaser.detected = false;
+    m_Phaser.thLow = false;
+    m_Phaser.thEndCycle = 0;
+    m_Phaser.thLine = -1;
+    m_Phaser.thRemaining = 0;
 
     m_LineEvents.hint = false;
     m_LineEvents.scrollx = false;
@@ -261,6 +270,33 @@ unsigned int Video::GetCyclesToNextEvent() const
     consider(m_LineEvents.spriteovr, m_Timing[TIMING_SPRITEOVR], false);
     consider(m_LineEvents.render, m_Timing[TIMING_RENDER], false);
 
+    // The Light Phaser is a raster-time input. The CPU must not be allowed to
+    // run past the optical edge before TH can become observable. This is the
+    // key timing distinction from the previous implementation.
+    if (m_Phaser.enabled && !m_bGameGear && !m_Phaser.thLow)
+    {
+        const int max_height = m_bExtendedMode224 ? 224 : 192;
+        const int line = m_iRenderLine;
+        if (line >= 0 && line < max_height && line != m_Phaser.thLine)
+        {
+            const int dy = line - m_Phaser.y;
+            const int radius = 10;
+            if (dy >= -radius && dy <= radius)
+            {
+                const int dx2 = radius * radius - dy * dy;
+                const int dx = static_cast<int>(sqrt(static_cast<double>(dx2)));
+                const int leftX = m_Phaser.x - dx;
+                const int sampleX = leftX + m_iHideLeftBarOffset;
+                if (leftX >= 0 && sampleX >= 0 && sampleX < m_iScreenWidth)
+                {
+                    const int opticalCycle = 31 + ((sampleX * 170) / 256);
+                    if (m_LineEvents.render && opticalCycle > static_cast<int>(current) && static_cast<unsigned int>(opticalCycle) < next)
+                        next = static_cast<unsigned int>(opticalCycle);
+                }
+            }
+        }
+    }
+
     if (m_bSpriteCollisionRequest && !m_LineEvents.render)
     {
         int col_offset = m_bGameGear ? 22 : 20;
@@ -281,8 +317,18 @@ bool Video::Tick(unsigned int clockCycles)
 
     m_iCycleCounter += clockCycles;
 
+    if (m_Phaser.thLow && m_Phaser.thRemaining > 0)
+    {
+        m_Phaser.thRemaining -= static_cast<int>(clockCycles);
+        if (m_Phaser.thRemaining <= 0)
+        {
+            m_Phaser.thRemaining = 0;
+            m_Phaser.thLow = false;
+        }
+    }
+
     ///// PHASER /////
-    if (m_Phaser.enabled && !m_Phaser.detected && !m_bGameGear)
+    if (m_Phaser.enabled && !m_bGameGear)
     {
         CheckPhaser();
     }
@@ -487,6 +533,11 @@ bool Video::Tick(unsigned int clockCycles)
 
         m_LineEvents.render = true;
         ScanLine(m_iRenderLine);
+        // The optical source becomes valid when the scanline has actually
+        // been rendered. Check again here so the TH transition is not delayed
+        // until the CPU executes another instruction.
+        if (m_Phaser.enabled && !m_bGameGear)
+            CheckPhaser();
     }
 
     ///// END OF LINE /////
@@ -507,15 +558,28 @@ bool Video::Tick(unsigned int clockCycles)
         m_LineEvents.render = false;
         m_LineEvents.display = false;
         m_LineEvents.spriteovr = false;
-        m_Phaser.detected = false;
+        // Do NOT clear the Light Phaser pulse at the scanline boundary. The
+        // real TH pulse is long enough to cross a 63us SMS scanline. Clearing
+        // it here made shots near the right edge intermittently invisible to
+        // Missile Defense 3-D's polling loop.
+        m_Phaser.thEndCycle = 0;
+        m_Phaser.thLine = -1;
     }
 
     return return_vblank;
 }
 
+void Video::LatchHCounterAt(int cycle)
+{
+    if (cycle < 0)
+        cycle = 0;
+    cycle %= GS_CYCLES_PER_LINE;
+    m_iHCounter = kVdpHCounter[cycle];
+}
+
 void Video::LatchHCounter()
 {
-    m_iHCounter = kVdpHCounter[m_iCycleCounter % GS_CYCLES_PER_LINE];
+    LatchHCounterAt(m_iCycleCounter);
 }
 
 u8 Video::GetVCounter()
@@ -1555,11 +1619,21 @@ void Video::SetPhaserCoordinates(int x, int y)
     m_Phaser.x = x;
     m_Phaser.y = y;
     m_Phaser.enabled = true;
+    m_Phaser.detected = false;
+    m_Phaser.thLow = false;
+    m_Phaser.thEndCycle = 0;
+    m_Phaser.thLine = -1;
+    m_Phaser.thRemaining = 0;
 }
 
 bool Video::IsPhaserDetected()
 {
     return m_Phaser.detected;
+}
+
+bool Video::IsPhaserTHLow()
+{
+    return m_Phaser.thLow;
 }
 
 void Video::DrawPhaserCrosshair(int x, int y)
@@ -1663,6 +1737,7 @@ void Video::DrawPhaserCrosshair(int x, int y)
     }
 }
 
+
 void Video::SetLightPhaserCrosshair(bool enable, LightPhaserCrosshairShape shape, LightPhaserCrosshairColor color)
 {
     m_bLightPhaserCrosshair = enable;
@@ -1704,27 +1779,96 @@ int Video::CalculateVideoMode()
         return 0;
 }
 
+int Video::GetPhaserOpticalCycle() const
+{
+    const int radius = 10;
+    const int dy = m_iRenderLine - m_Phaser.y;
+    if (dy < -radius || dy > radius)
+        return -1;
+
+    const int dx2 = radius * radius - dy * dy;
+    const int dx = static_cast<int>(sqrt(static_cast<double>(dx2)));
+    const int leftX = m_Phaser.x - dx;
+    const int sampleX = leftX + m_iHideLeftBarOffset;
+    if (leftX < 0 || leftX >= 256 || sampleX < 0 || sampleX >= m_iScreenWidth)
+        return -1;
+
+    return 31 + ((sampleX * 170) / 256);
+}
+
+bool Video::IsPhaserOpticallyLit(int line, int x) const
+{
+    const int max_height = m_bExtendedMode224 ? 224 : 192;
+    if (line < 0 || line >= max_height || x < 0 || x >= m_iScreenWidth)
+        return false;
+
+    const u16 pixel = m_pFrameBuffer[line * m_iScreenWidth + x];
+    const int r = ((pixel >> 11) & 0x1F) * 255 / 31;
+    const int g = ((pixel >> 5) & 0x3F) * 255 / 63;
+    const int b = (pixel & 0x1F) * 255 / 31;
+    const int luminance = (r * 299 + g * 587 + b * 114) / 1000;
+    return luminance >= 32;
+}
+
 void Video::CheckPhaser()
 {
-    int max_height = m_bExtendedMode224 ? 224 : 192;
+    if (!m_Phaser.enabled || m_bGameGear)
+        return;
 
+    // TH is generated by the optical sensor, not by the touchscreen. Once the
+    // sensor sees the bright raster, the SMS VDP latches H at that exact
+    // horizontal position and the controller exposes an active-low TH pulse.
+    if (m_Phaser.thLow)
+        return;
+
+    const int max_height = m_bExtendedMode224 ? 224 : 192;
+    const int line = m_iRenderLine;
+    if (line < 0 || line >= max_height)
+        return;
     if (m_Phaser.x < 0 || m_Phaser.x >= 256 || m_Phaser.y < 0 || m_Phaser.y >= max_height)
         return;
-
-    if (m_iCycleCounter < 31 || m_iCycleCounter >= (170 + 31))
+    if (m_Phaser.thLine == line)
         return;
 
-    int phaser_x_cyc = (((m_Phaser.x + m_iHideLeftBarOffset) * 170) / 256);
-    int cycles_adj = m_iCycleCounter - 31;
+    // ScanLine() must have completed before the framebuffer can be used as the
+    // optical source. If the render event has not happened yet, the scheduler
+    // will stop at it and call us again.
+    if (!m_LineEvents.render)
+        return;
 
-    bool xmatch = (phaser_x_cyc >= cycles_adj - 4) && (phaser_x_cyc <= cycles_adj + 4);
-    bool ymatch = (m_Phaser.y >= m_iRenderLine - 3) && (m_Phaser.y <= m_iRenderLine + 3);
+    const int radius = 10;
+    const int dy = line - m_Phaser.y;
+    if (dy < -radius || dy > radius)
+        return;
 
-    if (xmatch && ymatch)
-    {
-        m_iHCounter = kVdpHCounter[(m_iCycleCounter + 22) % GS_CYCLES_PER_LINE];
-        m_Phaser.detected = true;
-    }
+    const int dx2 = radius * radius - dy * dy;
+    const int dx = static_cast<int>(sqrt(static_cast<double>(dx2)));
+    const int leftX = m_Phaser.x - dx;
+    const int sampleX = leftX + m_iHideLeftBarOffset;
+    if (leftX < 0 || leftX >= 256 || sampleX < 0 || sampleX >= m_iScreenWidth)
+        return;
+
+    if (!IsPhaserOpticallyLit(line, sampleX))
+        return;
+
+    const int opticalCycle = 31 + ((sampleX * 170) / 256);
+    if (m_iCycleCounter < opticalCycle)
+        return;
+
+    // The real VDP latches H on the TH transition. The latch value is the
+    // optical raster position, not the touchscreen coordinate and not the CPU
+    // cycle at which the poll happens.
+    LatchHCounterAt(opticalCycle);
+
+    m_Phaser.thLow = true;
+    m_Phaser.detected = true;
+    m_Phaser.thLine = line;
+    // Missile Defense 3-D polls TH approximately every 25 Z80 clocks. A
+    // 20-30 us Light Phaser pulse is roughly 72-108 master clocks on NTSC;
+    // 80 clocks gives the same observable protocol without extending it into
+    // the next scanline unnecessarily.
+    m_Phaser.thRemaining = 80;
+    m_Phaser.thEndCycle = m_iCycleCounter + m_Phaser.thRemaining;
 }
 
 void Video::SaveState(std::ostream& stream)

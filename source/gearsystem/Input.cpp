@@ -68,16 +68,25 @@ void Input::SetReset(bool pressed)
 
 void Input::KeyPressed(GS_Joypads joypad, GS_Keys key)
 {
+    bool wasReleased = true;
     if (joypad == Joypad_1)
     {
+        wasReleased = (m_Joypad1 & key) != 0;
         if (!m_bGameGear && (key == Key_Start) && (m_Joypad1 & Key_Start))
             m_pProccesor->RequestNMI();
         m_Joypad1 &= ~key;
     }
     else
+    {
+        wasReleased = (m_Joypad2 & key) != 0;
         m_Joypad2 &= ~key;
+    }
 
-    if (!m_bGameGear && m_bPhaser && (key == Key_1))
+    // The 3DS frontend calls KeyPressed() every frame while A is held.
+    // A Light Phaser shot must be armed on the *edge* of TL, not on every
+    // repeated poll. Re-arming here was clearing an already generated TH
+    // pulse before Missile Defense 3-D could consume it.
+    if (!m_bGameGear && m_bPhaser && (key == Key_1) && wasReleased)
     {
         m_pVideo->SetPhaserCoordinates(m_Phaser.x + m_PhaserOffset.x, m_Phaser.y + m_PhaserOffset.y);
     }

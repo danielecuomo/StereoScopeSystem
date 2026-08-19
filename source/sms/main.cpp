@@ -38,6 +38,7 @@ static u8* frameBuffer = nullptr;
 static ndspWaveBuf audioWave[AUDIO_BUFFERS];
 static s16* audioBuffers[AUDIO_BUFFERS] = {};
 static int audioIndex = 0;
+static unsigned long long audioBufferWaits = 0;
 static bool audioInitialized = false;
 static bool textureInitialized = false;
 static bool stereoActive = false;
@@ -582,12 +583,20 @@ static void pushAudio(const s16* samples, int count)
 {
     if (!samples || count <= 0) return;
 
-    ndspWaveBuf& wave = audioWave[audioIndex];
-    if (wave.status != NDSP_WBUF_FREE && wave.status != NDSP_WBUF_DONE)
-        return;
-
     if (count > AUDIO_SAMPLES_MAX)
         count = AUDIO_SAMPLES_MAX;
+
+    ndspWaveBuf& wave = audioWave[audioIndex];
+
+    // Never silently discard an audio frame.  If the producer gets ahead of
+    // NDSP, wait for the oldest slot to become reusable instead of creating
+    // a hole in the audio stream.  With correct frame pacing this should be
+    // hit only after an unusual scheduling delay.
+    while (wave.status != NDSP_WBUF_FREE && wave.status != NDSP_WBUF_DONE)
+    {
+        ++audioBufferWaits;
+        svcSleepThread(1000000LL); // 1 ms
+    }
 
     memcpy(audioBuffers[audioIndex], samples, sizeof(s16) * count);
 
@@ -595,6 +604,49 @@ static void pushAudio(const s16* samples, int count)
     DSP_FlushDataCache(audioBuffers[audioIndex], sizeof(s16) * count);
     ndspChnWaveBufAdd(0, &wave);
     audioIndex = (audioIndex + 1) % AUDIO_BUFFERS;
+}
+
+static u64 getFramePeriodTicks(GS_Region region)
+{
+    const u64 frameCycles = static_cast<u64>(GS_CYCLES_PER_LINE) *
+        static_cast<u64>(region == Region_PAL ? GS_LINES_PER_FRAME_PAL : GS_LINES_PER_FRAME_NTSC);
+    const u64 masterClock = static_cast<u64>(
+        region == Region_PAL ? GS_MASTER_CLOCK_PAL : GS_MASTER_CLOCK_NTSC);
+
+    // Pace against the same master-clock/frame geometry used by the core,
+    // but in the 3DS high-resolution system-tick domain.  This avoids the
+    // old integer-millisecond 17 ms NTSC period, which ran the producer
+    // slower than the 44.1 kHz NDSP consumer.
+    return (static_cast<u64>(SYSCLOCK_ARM11) * frameCycles + masterClock / 2) / masterClock;
+}
+
+static void paceFrame(u64& nextFrameTick, GS_Region region)
+{
+    const u64 framePeriodTicks = getFramePeriodTicks(region);
+    const u64 now = svcGetSystemTick();
+
+    if (nextFrameTick == 0 || now > nextFrameTick + framePeriodTicks)
+    {
+        nextFrameTick = now + framePeriodTicks;
+        return;
+    }
+
+    while (true)
+    {
+        const u64 current = svcGetSystemTick();
+        if (current >= nextFrameTick)
+            break;
+
+        const u64 remainingTicks = nextFrameTick - current;
+        const u64 sleepNs = (remainingTicks * 1000000000ULL) / SYSCLOCK_ARM11;
+        if (sleepNs > 1000000ULL)
+            svcSleepThread(static_cast<s64>(sleepNs - 500000ULL));
+        else
+            break;
+    }
+
+    while (svcGetSystemTick() < nextFrameTick) { }
+    nextFrameTick += framePeriodTicks;
 }
 
 static void updateTexture(C3D_Tex& tex)
@@ -642,6 +694,9 @@ struct TouchPhaserState
     int x;
     int y;
 };
+
+static int g_touchPhaserX = 128;
+static int g_touchPhaserY = 96;
 
 static void drawPhaserCrosshair(float cx, float cy, float depth)
 {
@@ -781,14 +836,12 @@ static TouchPhaserState bindInputs(GearsystemCore& core, bool missileDefense3D)
             core.SetPhaser(x, y);
         }
         // Keep the last aimed position after lifting the finger.
-        static int lastX = 128;
-        static int lastY = 96;
         if (state.valid)
         {
-            lastX = state.x;
-            lastY = state.y;
+            g_touchPhaserX = state.x;
+            g_touchPhaserY = state.y;
         }
-        core.SetPhaser(lastX, lastY);
+        core.SetPhaser(g_touchPhaserX, g_touchPhaserY);
         setKey(KEY_A, Key_1);
     }
     else
@@ -1008,7 +1061,9 @@ int main(int argc, char* argv[])
             if (missileDefense3D)
             {
                 core.EnablePhaser(true);
-                core.SetPhaser(128, 96);
+                g_touchPhaserX = 128;
+                g_touchPhaserY = 96;
+                core.SetPhaser(g_touchPhaserX, g_touchPhaserY);
                 printf("Missile Defense 3-D detected (Product Code 8001).\n");
                 printf("Touch lower screen to aim; press A to fire.\n");
             }
@@ -1053,7 +1108,7 @@ int main(int argc, char* argv[])
             printf("%s\n", core.GetCartridge()->GetFileName());
 
             bool returnToBrowser = false;
-            u64 nextFrameMs = 0;
+            u64 nextFrameTick = 0;
             TouchPhaserState touchPhaser = { false, 128, 96 };
             while (aptMainLoop())
             {
@@ -1090,23 +1145,11 @@ int main(int argc, char* argv[])
                 renderFrame(topLeft, topRight, videoTextureSlot, missileDefense3D, touchPhaser);
                 videoTextureSlot = (videoTextureSlot + 1) % VIDEO_TEXTURE_SLOTS;
 
-                // PAL SMS runs at 50 Hz. Pace the emulator explicitly rather
-                // than using SYNCDRAW, so display synchronization does not add
-                // a full frame of latency when the CPU finishes early.
-                const u64 nowMs = osGetTime();
-                const u64 framePeriodMs = (runtimeInfo.region == Region_PAL) ? 20 : 17;
-                if (nextFrameMs == 0 || nowMs > nextFrameMs + framePeriodMs)
-                    nextFrameMs = nowMs + framePeriodMs;
-                else
-                {
-                    if (nowMs < nextFrameMs)
-                    {
-                        const u64 sleepMs = nextFrameMs - nowMs;
-                        if (sleepMs > 1) svcSleepThread((sleepMs - 1) * 1000000LL);
-                        while (osGetTime() < nextFrameMs) { }
-                    }
-                    nextFrameMs += framePeriodMs;
-                }
+                // Pace from the emulated master clock using the 3DS
+                // high-resolution system tick.  NTSC is not 17 ms/frame;
+                // using integer milliseconds makes the audio producer run
+                // too slowly and eventually starves NDSP.
+                paceFrame(nextFrameTick, runtimeInfo.region);
             }
 
             // Persist the current cartridge before returning to the browser.

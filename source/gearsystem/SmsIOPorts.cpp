@@ -18,6 +18,7 @@
  */
 
 #include "SmsIOPorts.h"
+#include "MissileDefense3DPatcher.h"
 
 SmsIOPorts::SmsIOPorts(Audio* pAudio, Video* pVideo, Input* pInput, Cartridge* pCartridge, Memory* pMemory, Processor* pProcessor)
 {
@@ -43,6 +44,11 @@ void SmsIOPorts::SetTraceLogger(TraceLogger* pTraceLogger)
 void SmsIOPorts::Reset()
 {
     m_Port3F = 0xFF;
+    m_md3dShotActive = false;
+    m_md3dPollHigh = true;
+    m_md3dSample = 0;
+    m_md3dH = 0;
+    m_md3dV = 0;
 }
 
 void SmsIOPorts::SaveState(std::ostream& stream)
@@ -50,6 +56,11 @@ void SmsIOPorts::SaveState(std::ostream& stream)
     using namespace std;
 
     stream.write(reinterpret_cast<const char*> (&m_Port3F), sizeof(m_Port3F));
+    stream.write(reinterpret_cast<const char*> (&m_md3dShotActive), sizeof(m_md3dShotActive));
+    stream.write(reinterpret_cast<const char*> (&m_md3dPollHigh), sizeof(m_md3dPollHigh));
+    stream.write(reinterpret_cast<const char*> (&m_md3dSample), sizeof(m_md3dSample));
+    stream.write(reinterpret_cast<const char*> (&m_md3dH), sizeof(m_md3dH));
+    stream.write(reinterpret_cast<const char*> (&m_md3dV), sizeof(m_md3dV));
 }
 
 void SmsIOPorts::LoadState(std::istream& stream)
@@ -57,4 +68,9 @@ void SmsIOPorts::LoadState(std::istream& stream)
     using namespace std;
 
     stream.read(reinterpret_cast<char*> (&m_Port3F), sizeof(m_Port3F));
+    stream.read(reinterpret_cast<char*> (&m_md3dShotActive), sizeof(m_md3dShotActive));
+    stream.read(reinterpret_cast<char*> (&m_md3dPollHigh), sizeof(m_md3dPollHigh));
+    stream.read(reinterpret_cast<char*> (&m_md3dSample), sizeof(m_md3dSample));
+    stream.read(reinterpret_cast<char*> (&m_md3dH), sizeof(m_md3dH));
+    stream.read(reinterpret_cast<char*> (&m_md3dV), sizeof(m_md3dV));
 }

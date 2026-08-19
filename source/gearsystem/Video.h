@@ -98,6 +98,7 @@ public:
     int GetHideLeftBarOffset();
     void SetPhaserCoordinates(int x, int y);
     bool IsPhaserDetected();
+    bool IsPhaserTHLow();
     void DrawPhaserCrosshair(int x, int y);
     void SetLightPhaserCrosshair(bool enable, LightPhaserCrosshairShape shape, LightPhaserCrosshairColor color);
     void SetTraceLogger(TraceLogger* pTraceLogger);
@@ -112,6 +113,9 @@ private:
     void InitPalettes(const u8* src, u16* dest_565_rgb, u16* dest_555_rgb, u16* dest_565_bgr, u16* dest_555_bgr);
     int CalculateVideoMode();
     void CheckPhaser();
+    int GetPhaserOpticalCycle() const;
+    bool IsPhaserOpticallyLit(int line, int x) const;
+    void LatchHCounterAt(int cycle);
 
 private:
     Memory* m_pMemory;
@@ -152,6 +156,10 @@ private:
         int y;
         bool enabled;
         bool detected;
+        bool thLow;
+        int thEndCycle;
+        int thLine;
+        int thRemaining;
     };
     Phaser m_Phaser;
 

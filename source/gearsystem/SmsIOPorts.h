@@ -21,6 +21,8 @@
 #define	SMSIOPORTS_H
 
 #include "IOPorts.h"
+#include <math.h>
+#include "MissileDefense3DPatcher.h"
 
 class Audio;
 class Video;
@@ -51,6 +53,13 @@ private:
     Processor* m_pProcessor;
     TraceLogger* m_pTraceLogger;
     u8 m_Port3F;
+
+    // Missile Defense 3-D ROM-patch virtual Light Phaser ports.
+    bool m_md3dShotActive;
+    bool m_md3dPollHigh;
+    u8 m_md3dSample;
+    u8 m_md3dH;
+    u8 m_md3dV;
 };
 
 #include "Video.h"
@@ -64,6 +73,62 @@ private:
 
 inline u8 SmsIOPorts::DoInput(u8 port)
 {
+    // Missile Defense 3-D is dynamically patched at load time so its
+    // Light Phaser acquisition routine reads these private ports instead of
+    // the physical TH/H/V registers. The original Z80 algorithm is retained.
+    if (m_pCartridge->GetCRC() == MissileDefense3DPatcher::ROM_CRC &&
+        port >= 0xFD && port <= 0xFF)
+    {
+        Input::stPhaser* phaser = m_pInput->GetPhaser();
+        const bool trigger = m_pInput->IsPhaserEnabled() &&
+                             m_pInput->IsKeyPressed(Joypad_1, Key_1);
+
+        if (!trigger)
+        {
+            m_md3dShotActive = false;
+            m_md3dPollHigh = true;
+            m_md3dSample = 0;
+            return (port == 0xFD) ? 0x40 : 0x00;
+        }
+
+        if (!m_md3dShotActive)
+        {
+            m_md3dShotActive = true;
+            m_md3dPollHigh = true;
+            m_md3dSample = 0;
+        }
+
+        if (port == 0xFD)
+        {
+            // IN A,($FD); ADD A,A; JP M,... makes bit 6 the virtual TH bit.
+            if (m_md3dPollHigh)
+            {
+                m_md3dPollHigh = false;
+                return 0x40;
+            }
+
+            const int centerX = MAX(0, MIN(255, phaser->x));
+            const int centerY = MAX(0, MIN(191, phaser->y));
+            static const int kDy[6] = {-5, -4, -3, -2, -1, 0};
+            const int dy = kDy[m_md3dSample % 6];
+            const int rr = 10 * 10 - dy * dy;
+            const int dx = rr > 0 ? static_cast<int>(sqrt(static_cast<double>(rr))) : 0;
+            const int leftX = MAX(0, centerX - dx);
+
+            m_md3dH = static_cast<u8>(22 + (leftX / 2));
+            m_md3dV = static_cast<u8>(MAX(0, MIN(255, centerY + dy)));
+            return 0x00;
+        }
+
+        if (port == 0xFE)
+            return m_md3dH;
+
+        const u8 ret = m_md3dV;
+        ++m_md3dSample;
+        m_md3dPollHigh = true;
+        return ret;
+    }
+
     if (port < 0x40)
     {
         Debug("--> ** Attempting to read from port $%02X", port);

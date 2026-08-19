@@ -26,6 +26,7 @@
 #undef MINIZ_NO_ZLIB_COMPATIBLE_NAMES
 #include "log.h"
 #include "common.h"
+#include "MissileDefense3DPatcher.h"
 
 Cartridge::Cartridge()
 {
@@ -578,6 +579,11 @@ bool Cartridge::LoadFromBuffer(const u8* buffer, int size, const char* path)
         m_bReady = true;
 
         m_iCRC = CalculateCRC32(0, m_pROM, m_iROMSize);
+
+        // Keep the original CRC for database/save-state identity, then patch
+        // only the in-memory cartridge image for Missile Defense 3-D.
+        // The file on disk is never modified.
+        MissileDefense3DPatcher::Apply(m_pROM, m_iROMSize, m_iCRC);
 
         return GatherMetadata(m_iCRC);
     }
