@@ -433,6 +433,13 @@ void GearsystemCore::KeyPressed(GS_Joypads joypad, GS_Keys key)
 void GearsystemCore::KeyReleased(GS_Joypads joypad, GS_Keys key)
 {
     m_pInput->KeyReleased(joypad, key);
+
+    // Missile Defense 3-D's patched Light Phaser has state spanning multiple
+    // IN instructions. The game does not necessarily read the virtual ports
+    // after TL is released, so relying on SmsIOPorts::DoInput() to observe the
+    // release can leave the next shot starting from the previous sample.
+    if (joypad == Joypad_1 && key == Key_1 && m_pSmsIOPorts)
+        m_pSmsIOPorts->ResetMissileDefenseShot();
 }
 
 void GearsystemCore::SetReset(bool pressed)

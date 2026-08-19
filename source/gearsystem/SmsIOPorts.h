@@ -38,6 +38,7 @@ public:
     SmsIOPorts(Audio* pAudio, Video* pVideo, Input* pInput, Cartridge* pCartridge, Memory* pMemory, Processor* pProcessor);
     ~SmsIOPorts();
     void Reset();
+    void ResetMissileDefenseShot();
     u8 DoInput(u8 port);
     void DoOutput(u8 port, u8 value);
     void SaveState(std::ostream& stream);
@@ -115,8 +116,14 @@ inline u8 SmsIOPorts::DoInput(u8 port)
             const int dx = rr > 0 ? static_cast<int>(sqrt(static_cast<double>(rr))) : 0;
             const int leftX = MAX(0, centerX - dx);
 
-            m_md3dH = static_cast<u8>(22 + (leftX / 2));
-            m_md3dV = static_cast<u8>(MAX(0, MIN(255, centerY + dy)));
+            // Missile Defense 3-D averages the left-edge samples, which
+            // intentionally biases the reconstructed aim point left/up.
+            // Compensate that game-specific reconstruction bias here while
+            // keeping the physical model as the left edge of the aperture.
+            constexpr int kHCalibration = 3;
+            constexpr int kVCalibration = 2;
+            m_md3dH = static_cast<u8>(MAX(0, MIN(255, 22 + (leftX / 2) + kHCalibration)));
+            m_md3dV = static_cast<u8>(MAX(0, MIN(255, centerY + dy + kVCalibration)));
             return 0x00;
         }
 

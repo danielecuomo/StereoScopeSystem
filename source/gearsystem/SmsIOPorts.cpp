@@ -44,6 +44,11 @@ void SmsIOPorts::SetTraceLogger(TraceLogger* pTraceLogger)
 void SmsIOPorts::Reset()
 {
     m_Port3F = 0xFF;
+    ResetMissileDefenseShot();
+}
+
+void SmsIOPorts::ResetMissileDefenseShot()
+{
     m_md3dShotActive = false;
     m_md3dPollHigh = true;
     m_md3dSample = 0;

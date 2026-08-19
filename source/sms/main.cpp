@@ -24,20 +24,28 @@ static constexpr int FB_H = 192;
 static constexpr int TEX_W = 256;
 static constexpr int TEX_H = 256;
 static constexpr int GS_FB_W = GS_RESOLUTION_MAX_WIDTH_WITH_OVERSCAN;
-static constexpr int AUDIO_BUFFERS = 4;
+static constexpr int AUDIO_BUFFERS = 8;
 static constexpr int AUDIO_SAMPLES_MAX = GS_AUDIO_BUFFER_SIZE;
+static constexpr int AUDIO_FIFO_SAMPLES = 32768;
 
 static constexpr int VIDEO_TEXTURE_SLOTS = 3;
 static C3D_Tex gameTex[VIDEO_TEXTURE_SLOTS * 2];
 static Tex3DS_SubTexture gameSubTex[VIDEO_TEXTURE_SLOTS * 2];
 static C2D_Image gameImage[VIDEO_TEXTURE_SLOTS * 2];
-static int videoTextureSlot = 0;
+// Each eye owns its own triple-buffer cursor.  The two eyes are produced on
+// alternating emulator frames, so a single shared cursor would pair a new
+// left image with an unrelated/stale right image (visible as flicker).
+static int videoTextureSlot[2] = { 0, 0 };
 static u16* uploadBuffer = nullptr;
 static u8* frameBuffer = nullptr;
 
 static ndspWaveBuf audioWave[AUDIO_BUFFERS];
 static s16* audioBuffers[AUDIO_BUFFERS] = {};
 static int audioIndex = 0;
+static s16* audioFifo = nullptr;
+static int audioFifoHead = 0;
+static int audioFifoTail = 0;
+static int audioFifoCount = 0;
 static unsigned long long audioBufferWaits = 0;
 static bool audioInitialized = false;
 static bool textureInitialized = false;
@@ -568,9 +576,33 @@ static void initAudio()
     mix[1] = 1.0f;
     ndspChnSetMix(0, mix);
 
+    audioFifo = (s16*)linearAlloc(sizeof(s16) * AUDIO_FIFO_SAMPLES);
+    if (!audioFifo)
+    {
+        printf("Failed to allocate audio FIFO.\n");
+        ndspExit();
+        audioInitialized = false;
+        return;
+    }
+    memset(audioFifo, 0, sizeof(s16) * AUDIO_FIFO_SAMPLES);
+
     for (int i = 0; i < AUDIO_BUFFERS; ++i)
     {
         audioBuffers[i] = (s16*)linearAlloc(sizeof(s16) * AUDIO_SAMPLES_MAX);
+        if (!audioBuffers[i])
+        {
+            printf("Failed to allocate audio buffer %d.\n", i);
+            for (int j = 0; j < i; ++j)
+            {
+                linearFree(audioBuffers[j]);
+                audioBuffers[j] = nullptr;
+            }
+            linearFree(audioFifo);
+            audioFifo = nullptr;
+            ndspExit();
+            audioInitialized = false;
+            return;
+        }
         memset(audioBuffers[i], 0, sizeof(s16) * AUDIO_SAMPLES_MAX);
         memset(&audioWave[i], 0, sizeof(audioWave[i]));
         audioWave[i].data_pcm16 = audioBuffers[i];
@@ -579,31 +611,81 @@ static void initAudio()
     }
 }
 
+static bool audioWaveFree(const ndspWaveBuf& wave)
+{
+    return wave.status == NDSP_WBUF_FREE || wave.status == NDSP_WBUF_DONE;
+}
+
+static void pumpAudio()
+{
+    if (!audioInitialized || !audioFifo || audioFifoCount <= 0)
+        return;
+
+    // Feed NDSP in fixed-size chunks rather than one chunk per emulated frame.
+    // A 60 Hz SMS frame produces ~1470 interleaved samples at 44.1 kHz, which
+    // does not divide evenly into an NDSP buffer.  Keeping a FIFO here prevents
+    // those fractional frame boundaries from becoming audible gaps.
+    for (int n = 0; n < AUDIO_BUFFERS && audioFifoCount >= AUDIO_SAMPLES_MAX; ++n)
+    {
+        ndspWaveBuf& wave = audioWave[audioIndex];
+        if (!audioWaveFree(wave))
+            break;
+
+        int chunk = std::min(audioFifoCount, AUDIO_SAMPLES_MAX);
+        chunk &= ~1; // stereo PCM16: always submit complete L/R pairs
+        if (chunk <= 0)
+            break;
+
+        int first = std::min(chunk, AUDIO_FIFO_SAMPLES - audioFifoHead);
+        memcpy(audioBuffers[audioIndex], audioFifo + audioFifoHead,
+               sizeof(s16) * first);
+        if (first < chunk)
+        {
+            memcpy(audioBuffers[audioIndex] + first, audioFifo,
+                   sizeof(s16) * (chunk - first));
+        }
+        audioFifoHead = (audioFifoHead + chunk) % AUDIO_FIFO_SAMPLES;
+        audioFifoCount -= chunk;
+
+        wave.nsamples = chunk / 2;
+        DSP_FlushDataCache(audioBuffers[audioIndex], sizeof(s16) * chunk);
+        ndspChnWaveBufAdd(0, &wave);
+        audioIndex = (audioIndex + 1) % AUDIO_BUFFERS;
+    }
+}
+
 static void pushAudio(const s16* samples, int count)
 {
-    if (!samples || count <= 0) return;
+    if (!audioInitialized || !samples || count <= 0)
+        return;
 
-    if (count > AUDIO_SAMPLES_MAX)
-        count = AUDIO_SAMPLES_MAX;
+    count = std::min(count, AUDIO_SAMPLES_MAX);
+    count &= ~1;
+    if (count <= 0)
+        return;
 
-    ndspWaveBuf& wave = audioWave[audioIndex];
-
-    // Never silently discard an audio frame.  If the producer gets ahead of
-    // NDSP, wait for the oldest slot to become reusable instead of creating
-    // a hole in the audio stream.  With correct frame pacing this should be
-    // hit only after an unusual scheduling delay.
-    while (wave.status != NDSP_WBUF_FREE && wave.status != NDSP_WBUF_DONE)
+    // Normally the FIFO has tens of milliseconds of headroom.  If the DSP
+    // really falls behind for an extended period, wait only until enough room
+    // exists to preserve the audio stream; never overwrite/drop old samples.
+    while (AUDIO_FIFO_SAMPLES - audioFifoCount < count)
     {
+        pumpAudio();
+        if (AUDIO_FIFO_SAMPLES - audioFifoCount >= count)
+            break;
         ++audioBufferWaits;
-        svcSleepThread(1000000LL); // 1 ms
+        svcSleepThread(1000000LL);
     }
 
-    memcpy(audioBuffers[audioIndex], samples, sizeof(s16) * count);
+    int first = std::min(count, AUDIO_FIFO_SAMPLES - audioFifoTail);
+    memcpy(audioFifo + audioFifoTail, samples, sizeof(s16) * first);
+    if (first < count)
+    {
+        memcpy(audioFifo, samples + first, sizeof(s16) * (count - first));
+    }
+    audioFifoTail = (audioFifoTail + count) % AUDIO_FIFO_SAMPLES;
+    audioFifoCount += count;
 
-    wave.nsamples = count / 2;
-    DSP_FlushDataCache(audioBuffers[audioIndex], sizeof(s16) * count);
-    ndspChnWaveBufAdd(0, &wave);
-    audioIndex = (audioIndex + 1) % AUDIO_BUFFERS;
+    pumpAudio();
 }
 
 static u64 getFramePeriodTicks(GS_Region region)
@@ -705,28 +787,39 @@ static void drawPhaserCrosshair(float cx, float cy, float depth)
     C2D_DrawRectSolid(cx - 1.0f, cy - 8.0f, depth, 2.0f, 16.0f, color);
 }
 
-static void renderFrame(C3D_RenderTarget* topLeft, C3D_RenderTarget* topRight, int slot,
+// Put the virtual crosshair slightly in front of the game plane. On the
+// 3DS this is achieved by giving the crosshair crossed stereo disparity: the
+// left-eye image moves right and the right-eye image moves left.
+static constexpr float kCrosshairStereoParallax = 8.0f;
+
+static bool renderFrame(C3D_RenderTarget* topLeft, C3D_RenderTarget* topRight,
                          bool missileDefense3D, const TouchPhaserState& touch)
 {
     // Non-blocking presentation keeps the emulator CPU from waiting on the
-    // display.  Textures are triple-buffered per eye, so the CPU never
-    // rewrites the texture used by the previous two frames.
-    C3D_FrameBegin(C3D_FRAME_NONBLOCK);
+    // display.  Each eye has an independent triple-buffer cursor because the
+    // SegaScope alternates eyes on successive emulator frames.
+    if (!C3D_FrameBegin(C3D_FRAME_NONBLOCK))
+        return false;
+
+    const int leftSlot = videoTextureSlot[0];
+    const int rightSlot = videoTextureSlot[1];
 
     C2D_TargetClear(topLeft, C2D_Color32(0, 0, 0, 255));
     C2D_SceneBegin(topLeft);
-    C2D_DrawImageAt(gameImage[slot * 2], 72.0f, 24.0f, 0.5f, nullptr, 1.0f, 1.0f);
+    C2D_DrawImageAt(gameImage[leftSlot * 2], 72.0f, 24.0f, 0.5f, nullptr, 1.0f, 1.0f);
     if (missileDefense3D && touch.valid)
-        drawPhaserCrosshair(72.0f + static_cast<float>(touch.x),
+        drawPhaserCrosshair(72.0f + static_cast<float>(touch.x) +
+                                (stereoActive ? kCrosshairStereoParallax * 0.5f : 0.0f),
                             24.0f + static_cast<float>(touch.y), 0.6f);
 
     if (stereoActive)
     {
         C2D_TargetClear(topRight, C2D_Color32(0, 0, 0, 255));
         C2D_SceneBegin(topRight);
-        C2D_DrawImageAt(gameImage[slot * 2 + 1], 72.0f, 24.0f, 0.5f, nullptr, 1.0f, 1.0f);
+        C2D_DrawImageAt(gameImage[rightSlot * 2 + 1], 72.0f, 24.0f, 0.5f, nullptr, 1.0f, 1.0f);
         if (missileDefense3D && touch.valid)
-            drawPhaserCrosshair(72.0f + static_cast<float>(touch.x),
+            drawPhaserCrosshair(72.0f + static_cast<float>(touch.x) -
+                                    kCrosshairStereoParallax * 0.5f,
                                 24.0f + static_cast<float>(touch.y), 0.6f);
     }
 
@@ -737,6 +830,7 @@ static void renderFrame(C3D_RenderTarget* topLeft, C3D_RenderTarget* topRight, i
     C2D_Flush();
 
     C3D_FrameEnd(0);
+    return true;
 }
 
 static int glassesEyeFromRegistry(GearsystemCore& core)
@@ -764,7 +858,8 @@ static void updateStereoDetection(int eye)
 
 static void updateEyeTexture(int eye)
 {
-    updateTexture(gameTex[videoTextureSlot * 2 + eye]);
+    const int slot = videoTextureSlot[eye];
+    updateTexture(gameTex[slot * 2 + eye]);
 }
 
 static bool loadBundledRom(std::string& path)
@@ -1096,6 +1191,11 @@ int main(int argc, char* argv[])
             // Reset per-ROM stereo detection when a new cartridge starts.
             stereoActive = false;
             previousGlassesEye = -1;
+            videoTextureSlot[0] = 0;
+            videoTextureSlot[1] = 0;
+            audioFifoHead = 0;
+            audioFifoTail = 0;
+            audioFifoCount = 0;
             display3DEnabled = false;
             gfxSet3D(false);
 
@@ -1142,8 +1242,8 @@ int main(int argc, char* argv[])
                     updateEyeTexture(eye);
                 }
 
-                renderFrame(topLeft, topRight, videoTextureSlot, missileDefense3D, touchPhaser);
-                videoTextureSlot = (videoTextureSlot + 1) % VIDEO_TEXTURE_SLOTS;
+                if (renderFrame(topLeft, topRight, missileDefense3D, touchPhaser))
+                    videoTextureSlot[eye] = (videoTextureSlot[eye] + 1) % VIDEO_TEXTURE_SLOTS;
 
                 // Pace from the emulated master clock using the 3DS
                 // high-resolution system tick.  NTSC is not 17 ms/frame;
@@ -1170,6 +1270,8 @@ cleanup:
         if (audioBuffers[i])
             linearFree(audioBuffers[i]);
     }
+    if (audioFifo)
+        linearFree(audioFifo);
     if (audioInitialized) ndspExit();
 
     if (textureInitialized)
