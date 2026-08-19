@@ -92,8 +92,6 @@ Only files with the `.sms` extension are considered.
 | START | Start |
 | SELECT | Return to ROM browser |
 
-The Light Phaser for **Missile Defense** is currently not supported.
-
 ## Notes
 
 This repository contains the emulator/application source and does **not** include commercial game ROMs.
