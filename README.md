@@ -103,3 +103,7 @@ Use only ROM images that you are legally entitled to use.
 ## License
 
 See the individual source files and bundled components for their applicable copyright and license terms. The `source/gearsystem/` directory contains the Gearsystem emulation core and should be treated according to the licensing terms of that component.
+
+## Test
+
+Tested on New 3DS XL
