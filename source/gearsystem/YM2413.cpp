@@ -150,22 +150,47 @@ void YM2413::Enable(bool bEnabled)
 
 void YM2413::Sync()
 {
-    for (int i = 0; i < m_ElapsedCycles; i++)
+    const int scale = (1 << kYM2413SampleAccuracy);
+    int remaining = m_ElapsedCycles;
+
+    // The YM2413 clock is the SMS master clock divided by 72, while the
+    // output sample clock is derived independently from the master clock.
+    // The old implementation visited every master-clock cycle. On ARM11
+    // that means roughly 3.58 million iterations per NTSC frame for an
+    // enabled YM2413, even though only ~50k YM/sample events are required.
+    // That CPU load is large enough to starve NDSP and produces the audible
+    // gaps seen by SegaScope/YM2413 games.
+    //
+    // Advance directly to the next YM update or output-sample event. This
+    // preserves the event ordering of the old cycle-by-cycle implementation:
+    // when both events land on the same master cycle, YM2413Update() happens
+    // first and the newly generated value is emitted as that sample.
+    while (remaining > 0)
     {
+        const int cyclesToYm = m_bEnabled ? (72 - m_iCycleCounter) : remaining + 1;
+        const int cyclesToSample =
+            (m_iSampleCounter >= scale) ? 1 :
+            (scale - m_iSampleCounter + m_iSampleRateFactor - 1) / m_iSampleRateFactor;
+
+        const int step = std::min(remaining, std::min(cyclesToYm, cyclesToSample));
+
         if (m_bEnabled)
         {
-            m_iCycleCounter ++;
-            if (m_iCycleCounter >= 72)
-            {
-                m_iCycleCounter -= 72;
-                m_CurrentSample = YM2413Update();
-            }
+            m_iCycleCounter += step;
         }
 
-        m_iSampleCounter += m_iSampleRateFactor;
-        if (m_iSampleCounter >= (1 << kYM2413SampleAccuracy))
+        m_iSampleCounter += step * m_iSampleRateFactor;
+        remaining -= step;
+
+        if (m_bEnabled && m_iCycleCounter >= 72)
         {
-            m_iSampleCounter -= (1 << kYM2413SampleAccuracy);
+            m_iCycleCounter -= 72;
+            m_CurrentSample = YM2413Update();
+        }
+
+        if (m_iSampleCounter >= scale)
+        {
+            m_iSampleCounter -= scale;
 
             s16 sample = m_bEnabled ? m_CurrentSample : 0;
             m_pBuffer[m_iBufferIndex] = sample;

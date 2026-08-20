@@ -26,7 +26,8 @@ static constexpr int TEX_H = 256;
 static constexpr int GS_FB_W = GS_RESOLUTION_MAX_WIDTH_WITH_OVERSCAN;
 static constexpr int AUDIO_BUFFERS = 8;
 static constexpr int AUDIO_SAMPLES_MAX = GS_AUDIO_BUFFER_SIZE;
-static constexpr int AUDIO_FIFO_SAMPLES = 32768;
+static constexpr int AUDIO_FIFO_SAMPLES = 65536;
+static constexpr int AUDIO_TARGET_QUEUED = 6;
 
 static constexpr int VIDEO_TEXTURE_SLOTS = 3;
 static C3D_Tex gameTex[VIDEO_TEXTURE_SLOTS * 2];
@@ -35,7 +36,8 @@ static C2D_Image gameImage[VIDEO_TEXTURE_SLOTS * 2];
 // Each eye owns its own triple-buffer cursor.  The two eyes are produced on
 // alternating emulator frames, so a single shared cursor would pair a new
 // left image with an unrelated/stale right image (visible as flicker).
-static int videoTextureSlot[2] = { 0, 0 };
+static int videoWriteSlot[2] = { 0, 0 };
+static int videoDisplaySlot[2] = { 0, 0 };
 static u16* uploadBuffer = nullptr;
 static u8* frameBuffer = nullptr;
 
@@ -567,6 +569,7 @@ static void initAudio()
     audioInitialized = true;
 
     ndspChnReset(0);
+    ndspSetOutputMode(NDSP_OUTPUT_STEREO);
     ndspChnSetFormat(0, NDSP_FORMAT_STEREO_PCM16);
     ndspChnSetInterp(0, NDSP_INTERP_LINEAR);
     ndspChnSetRate(0, GS_AUDIO_SAMPLE_RATE);
@@ -616,26 +619,38 @@ static bool audioWaveFree(const ndspWaveBuf& wave)
     return wave.status == NDSP_WBUF_FREE || wave.status == NDSP_WBUF_DONE;
 }
 
+static int audioActiveBufferCount()
+{
+    int active = 0;
+    for (int i = 0; i < AUDIO_BUFFERS; ++i)
+    {
+        if (!audioWaveFree(audioWave[i]))
+            ++active;
+    }
+    return active;
+}
+
 static void pumpAudio()
 {
-    if (!audioInitialized || !audioFifo || audioFifoCount <= 0)
+    if (!audioInitialized || !audioFifo || audioFifoCount < AUDIO_SAMPLES_MAX)
         return;
 
-    // Feed NDSP in fixed-size chunks rather than one chunk per emulated frame.
-    // A 60 Hz SMS frame produces ~1470 interleaved samples at 44.1 kHz, which
-    // does not divide evenly into an NDSP buffer.  Keeping a FIFO here prevents
-    // those fractional frame boundaries from becoming audible gaps.
-    for (int n = 0; n < AUDIO_BUFFERS && audioFifoCount >= AUDIO_SAMPLES_MAX; ++n)
+    // Do not submit only the next available chunk. The previous implementation
+    // kept the FIFO almost empty, so NDSP often had only one ~23 ms wave queued.
+    // A small scheduling hiccup could therefore drain the queue and produce an
+    // audible hole/crackle. Keep several complete waves queued ahead of playback.
+    while (audioFifoCount >= AUDIO_SAMPLES_MAX &&
+           audioActiveBufferCount() < AUDIO_TARGET_QUEUED)
     {
         ndspWaveBuf& wave = audioWave[audioIndex];
         if (!audioWaveFree(wave))
-            break;
+        {
+            ++audioIndex;
+            audioIndex %= AUDIO_BUFFERS;
+            continue;
+        }
 
-        int chunk = std::min(audioFifoCount, AUDIO_SAMPLES_MAX);
-        chunk &= ~1; // stereo PCM16: always submit complete L/R pairs
-        if (chunk <= 0)
-            break;
-
+        const int chunk = AUDIO_SAMPLES_MAX;
         int first = std::min(chunk, AUDIO_FIFO_SAMPLES - audioFifoHead);
         memcpy(audioBuffers[audioIndex], audioFifo + audioFifoHead,
                sizeof(s16) * first);
@@ -796,13 +811,13 @@ static bool renderFrame(C3D_RenderTarget* topLeft, C3D_RenderTarget* topRight,
                          bool missileDefense3D, const TouchPhaserState& touch)
 {
     // Non-blocking presentation keeps the emulator CPU from waiting on the
-    // display.  Each eye has an independent triple-buffer cursor because the
-    // SegaScope alternates eyes on successive emulator frames.
+    // display.  SegaScope supplies one eye per emulator frame, so each eye
+    // keeps its last completed display slot while the other eye is updated.
     if (!C3D_FrameBegin(C3D_FRAME_NONBLOCK))
         return false;
 
-    const int leftSlot = videoTextureSlot[0];
-    const int rightSlot = videoTextureSlot[1];
+    const int leftSlot = videoDisplaySlot[0];
+    const int rightSlot = videoDisplaySlot[1];
 
     C2D_TargetClear(topLeft, C2D_Color32(0, 0, 0, 255));
     C2D_SceneBegin(topLeft);
@@ -858,7 +873,7 @@ static void updateStereoDetection(int eye)
 
 static void updateEyeTexture(int eye)
 {
-    const int slot = videoTextureSlot[eye];
+    const int slot = videoWriteSlot[eye];
     updateTexture(gameTex[slot * 2 + eye]);
 }
 
@@ -1191,8 +1206,10 @@ int main(int argc, char* argv[])
             // Reset per-ROM stereo detection when a new cartridge starts.
             stereoActive = false;
             previousGlassesEye = -1;
-            videoTextureSlot[0] = 0;
-            videoTextureSlot[1] = 0;
+            videoWriteSlot[0] = 0;
+            videoWriteSlot[1] = 0;
+            videoDisplaySlot[0] = 0;
+            videoDisplaySlot[1] = 0;
             audioFifoHead = 0;
             audioFifoTail = 0;
             audioFifoCount = 0;
@@ -1242,8 +1259,19 @@ int main(int argc, char* argv[])
                     updateEyeTexture(eye);
                 }
 
+                // SegaScope supplies only one eye per emulator frame.  The
+                // displayed stereo pair therefore consists of the newly
+                // rendered eye plus the last completed frame of the other
+                // eye.  Keep separate write/display cursors: advancing the
+                // write cursor before the next presentation would otherwise
+                // make renderFrame() sample an unwritten texture slot.
+                const int completedSlot = videoWriteSlot[eye];
+                videoDisplaySlot[eye] = completedSlot;
+
                 if (renderFrame(topLeft, topRight, missileDefense3D, touchPhaser))
-                    videoTextureSlot[eye] = (videoTextureSlot[eye] + 1) % VIDEO_TEXTURE_SLOTS;
+                {
+                    videoWriteSlot[eye] = (completedSlot + 1) % VIDEO_TEXTURE_SLOTS;
+                }
 
                 // Pace from the emulated master clock using the 3DS
                 // high-resolution system tick.  NTSC is not 17 ms/frame;
