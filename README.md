@@ -1,4 +1,5 @@
 # StereoScopeSystem
+<img width="2138" height="736" alt="Image" src="https://github.com/user-attachments/assets/c8ccef21-100e-4d5a-b78b-4d39a6e55ed6" />
 
 Nintendo 3DS homebrew application for playing Sega Master System (`.sms`) ROMs, built around the Gearsystem emulation core.
 
