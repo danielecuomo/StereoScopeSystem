@@ -1217,7 +1217,7 @@ int main(int argc, char* argv[])
             gfxSet3D(false);
 
             consoleClear();
-            printf("Red Viper SMS\n\n");
+            printf("StereoScopeSystem\n\n");
             printf("A/B   = SMS buttons 1/2\n");
             printf("START = Start\n");
             printf("D-Pad = Direction\n");
