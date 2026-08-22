@@ -40,6 +40,12 @@ static int videoWriteSlot[2] = { 0, 0 };
 static int videoDisplaySlot[2] = { 0, 0 };
 static u16* uploadBuffer = nullptr;
 static u8* frameBuffer = nullptr;
+static int videoFrameWidth = FB_W;
+
+static int gameViewportX()
+{
+    return 72 + (FB_W - videoFrameWidth) / 2;
+}
 
 static ndspWaveBuf audioWave[AUDIO_BUFFERS];
 static s16* audioBuffers[AUDIO_BUFFERS] = {};
@@ -764,8 +770,10 @@ static void updateTexture(C3D_Tex& tex)
     const u16* src = reinterpret_cast<const u16*>(frameBuffer);
     u16* dst = uploadBuffer;
 
-    // Only the 256x192 SMS framebuffer is rebuilt each frame. The lower 64
-    // texture rows are initialized once when uploadBuffer is allocated.
+    // HideLeftBarAuto makes the core framebuffer 248x192 when the SMS VDP
+    // requests the left 8-pixel blanking area to be hidden. Keep the PICA200
+    // texture physically 256x256, but only expose the active framebuffer
+    // width through the subtexture. The unused rightmost columns are cleared.
     for (int ty = 0; ty < FB_H; ty += 8)
     {
         for (int tx = 0; tx < TEX_W; tx += 8)
@@ -775,10 +783,20 @@ static void updateTexture(C3D_Tex& tex)
                 const int p = swizzle[i];
                 const int y = ty + (p >> 3);
                 const int x = tx + (p & 7);
-                dst[i] = src[y * FB_W + x];
+                dst[i] = (x < videoFrameWidth) ? src[y * videoFrameWidth + x] : 0;
             }
             dst += 64;
         }
+    }
+
+    for (int index = 0; index < VIDEO_TEXTURE_SLOTS * 2; ++index)
+    {
+        gameSubTex[index].width = videoFrameWidth;
+        gameSubTex[index].height = FB_H;
+        gameSubTex[index].left = 0.0f;
+        gameSubTex[index].top = 1.0f;
+        gameSubTex[index].right = (float)videoFrameWidth / (float)TEX_W;
+        gameSubTex[index].bottom = 1.0f - (float)FB_H / (float)TEX_H;
     }
 
     C3D_TexUpload(&tex, uploadBuffer);
@@ -821,9 +839,9 @@ static bool renderFrame(C3D_RenderTarget* topLeft, C3D_RenderTarget* topRight,
 
     C2D_TargetClear(topLeft, C2D_Color32(0, 0, 0, 255));
     C2D_SceneBegin(topLeft);
-    C2D_DrawImageAt(gameImage[leftSlot * 2], 72.0f, 24.0f, 0.5f, nullptr, 1.0f, 1.0f);
+    C2D_DrawImageAt(gameImage[leftSlot * 2], (float)gameViewportX(), 24.0f, 0.5f, nullptr, 1.0f, 1.0f);
     if (missileDefense3D && touch.valid)
-        drawPhaserCrosshair(72.0f + static_cast<float>(touch.x) +
+        drawPhaserCrosshair((float)gameViewportX() + static_cast<float>(touch.x) +
                                 (stereoActive ? kCrosshairStereoParallax * 0.5f : 0.0f),
                             24.0f + static_cast<float>(touch.y), 0.6f);
 
@@ -831,9 +849,9 @@ static bool renderFrame(C3D_RenderTarget* topLeft, C3D_RenderTarget* topRight,
     {
         C2D_TargetClear(topRight, C2D_Color32(0, 0, 0, 255));
         C2D_SceneBegin(topRight);
-        C2D_DrawImageAt(gameImage[rightSlot * 2 + 1], 72.0f, 24.0f, 0.5f, nullptr, 1.0f, 1.0f);
+        C2D_DrawImageAt(gameImage[rightSlot * 2 + 1], (float)gameViewportX(), 24.0f, 0.5f, nullptr, 1.0f, 1.0f);
         if (missileDefense3D && touch.valid)
-            drawPhaserCrosshair(72.0f + static_cast<float>(touch.x) -
+            drawPhaserCrosshair((float)gameViewportX() + static_cast<float>(touch.x) -
                                     kCrosshairStereoParallax * 0.5f,
                                 24.0f + static_cast<float>(touch.y), 0.6f);
     }
@@ -940,7 +958,7 @@ static TouchPhaserState bindInputs(GearsystemCore& core, bool missileDefense3D)
             hidTouchRead(&touch);
             int x = static_cast<int>(touch.px) - 32;
             int y = static_cast<int>(touch.py) - 24;
-            x = CLAMP(x, 0, FB_W - 1);
+            x = CLAMP(x, 0, videoFrameWidth - 1);
             y = CLAMP(y, 0, FB_H - 1);
             state = { true, x, y };
             core.SetPhaser(x, y);
@@ -1180,14 +1198,19 @@ int main(int argc, char* argv[])
 
             setGameInstructions(shortcutTitleForRom(romPath), missileDefense3D);
 
+            // Hide the SMS VDP's optional 8-pixel left blanking area. The core
+            // then exposes a packed 248x192 framebuffer when the game requests
+            // it, avoiding the monochrome border in the presentation texture.
+            core.GetVideo()->SetHideLeftBar(Video::HideLeftBarAuto);
+
             core.LoadRam();
 
             GS_RuntimeInfo info = {};
             core.GetRuntimeInfo(info);
-            if (info.screen_width != FB_W || info.screen_height != FB_H)
+            if ((info.screen_width != FB_W && info.screen_width != FB_W - 8) || info.screen_height != FB_H)
             {
                 printf("\nUnsupported SMS video mode: %dx%d\n", info.screen_width, info.screen_height);
-                printf("This build expects the standard 256x192 mode.\n");
+                printf("This build expects a standard 256x192 or 248x192 SMS mode.\n");
                 printf("Press START to return to the ROM browser.\n");
                 while (aptMainLoop())
                 {
@@ -1227,6 +1250,7 @@ int main(int argc, char* argv[])
             bool returnToBrowser = false;
             u64 nextFrameTick = 0;
             TouchPhaserState touchPhaser = { false, 128, 96 };
+            videoFrameWidth = FB_W;
             while (aptMainLoop())
             {
                 hidScanInput();
@@ -1240,11 +1264,12 @@ int main(int argc, char* argv[])
 
                 int sampleCount = 0;
                 core.RunToVBlank(nullptr, samples, &sampleCount, nullptr);
+                videoFrameWidth = FB_W - core.GetVideo()->GetHideLeftBarOffset();
                 core.GetVideo()->Render16bit(
                     core.GetVideo()->GetFrameBuffer(),
                     frameBuffer,
                     GS_PIXEL_RGB565,
-                    FB_W * FB_H,
+                    videoFrameWidth * FB_H,
                     false);
                 pushAudio(samples, sampleCount);
 

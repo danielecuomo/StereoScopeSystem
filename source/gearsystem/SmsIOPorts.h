@@ -108,7 +108,7 @@ inline u8 SmsIOPorts::DoInput(u8 port)
                 return 0x40;
             }
 
-            const int centerX = MAX(0, MIN(255, phaser->x));
+            const int centerX = MAX(0, MIN(255, phaser->x + m_pVideo->GetHideLeftBarOffset()));
             const int centerY = MAX(0, MIN(191, phaser->y));
             static const int kDy[6] = {-5, -4, -3, -2, -1, 0};
             const int dy = kDy[m_md3dSample % 6];
